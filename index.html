@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0" />
+    <title>NEXA15 - SMA Negeri 15 Ambon Digital Presence</title>
+    <meta name="description" content="Sistem Presensi Digital &amp; Manajemen Kehadiran Siswa/Guru dengan QR Code, Kartu Fisik RFID/NFC, AI Analysis, dan Pengaturan Identitas &amp; Logo Sekolah Terpusat." />
+    <meta property="og:title" content="NEXA15 - SMA Negeri 15 Ambon Digital Presence" />
+    <meta property="og:description" content="Sistem Presensi Digital &amp; Manajemen Kehadiran Siswa/Guru dengan QR Code, Kartu Fisik RFID/NFC, AI Analysis, dan Pengaturan Identitas &amp; Logo Sekolah Terpusat." />
+    
+    <script>
+      // 1. Immediately purge any active Service Worker and stale CacheStorage
+      if (typeof window !== 'undefined') {
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(regs) {
+            for (var i = 0; i < regs.length; i++) {
+              regs[i].unregister();
+            }
+          }).catch(function() {});
+        }
+        if ('caches' in window) {
+          caches.keys().then(function(keys) {
+            for (var i = 0; i < keys.length; i++) {
+              caches.delete(keys[i]);
+            }
+          }).catch(function() {});
+        }
+      }
+
+      // 2. Global Error Handler - Prevents persistent blank screen
+      window.addEventListener('error', function(e) {
+        console.error('NEXA15 Boot Error:', e.error || e.message);
+        var root = document.getElementById('root');
+        if (root && (!root.children.length || root.querySelector('.initial-loader'))) {
+          var errorMsg = e && (e.message || (e.error && e.error.message)) ? String(e.message || e.error.message) : 'Terjadi kendala saat memuat modul aplikasi.';
+          root.innerHTML = '<div style="min-height:100vh;background:#020617;color:#f8fafc;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif">' +
+            '<div style="max-width:440px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:24px;padding:32px;text-align:center;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5)">' +
+            '<div style="width:48px;height:48px;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.4);border-radius:16px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:24px;color:#f87171">⚠️</div>' +
+            '<h2 style="font-size:18px;font-weight:800;color:#ffffff;margin:0 0 8px">Gagal Memuat Komponen</h2>' +
+            '<p style="font-size:13px;color:#94a3b8;line-height:1.5;margin-bottom:16px">' + errorMsg + '</p>' +
+            '<button onclick="try{localStorage.clear();sessionStorage.clear();}catch(x){};if(navigator.serviceWorker){navigator.serviceWorker.getRegistrations().then(function(r){r.forEach(function(s){s.unregister()})})};location.reload(true)" style="background:#2563eb;color:#ffffff;border:none;padding:12px 20px;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;width:100%">Bersihkan Cache & Pulihkan</button>' +
+            '</div></div>';
+        }
+      });
+    </script>
+    <style>
+      @keyframes nexa-spin {
+        to { transform: rotate(360deg); }
+      }
+      .initial-loader {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        background-color: #020617;
+        color: #f8fafc;
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .initial-spinner {
+        width: 44px;
+        height: 44px;
+        border: 3px solid rgba(59, 130, 246, 0.2);
+        border-top-color: #38bdf8;
+        border-radius: 50%;
+        animation: nexa-spin 0.8s linear infinite;
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="initial-loader">
+        <div class="initial-spinner"></div>
+        <div style="font-weight: 800; font-size: 16px; letter-spacing: 0.05em; color: #ffffff;">NEXA15 SMART</div>
+        <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">SMA Negeri 15 Ambon</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

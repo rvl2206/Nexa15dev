@@ -1,0 +1,79 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for validating timestamps and strings
+    function isNonEmptyString(val) {
+      return val is string && val.size() > 0;
+    }
+
+    // App Users Collection: Managed users with bcrypt hashed passwords
+    match /app_users/{userId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.name is string &&
+                               request.resource.data.username is string &&
+                               request.resource.data.role in ['Admin', 'Guru', 'Kepala Sekolah'];
+      allow delete: if userId != 'usr-admin';
+    }
+
+    // Settings Collection: School settings, cutoff times, homeroom assignments, holidays
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if request.resource.data.schoolName is string;
+    }
+
+    // Students Collection: Master data siswa
+    match /students/{studentId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nama is string &&
+                               request.resource.data.kelas is string;
+      allow delete: if true;
+    }
+
+    // Teachers Collection: Master data guru & wali kelas
+    match /teachers/{teacherId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nama is string &&
+                               request.resource.data.nip is string;
+      allow delete: if true;
+    }
+
+    // Attendance Collection: Presensi siswa harian
+    match /attendance/{recordId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nama is string &&
+                               request.resource.data.status in ['Hadir', 'Terlambat', 'Izin', 'Sakit', 'Alpa'];
+      allow delete: if true;
+    }
+
+    // Teacher Attendance Collection: Presensi guru harian
+    match /teacher_attendance/{recordId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nama is string &&
+                               request.resource.data.status in ['Hadir', 'Terlambat', 'Izin', 'Sakit', 'Alpa', 'Dinas Luar'];
+      allow delete: if true;
+    }
+
+    // Dispatches Collection: Disposisi penanganan siswa bermasalah ke Wali Kelas & BK
+    match /dispatches/{dispatchId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.nama is string &&
+                               request.resource.data.kelas is string &&
+                               request.resource.data.status is string;
+      allow delete: if true;
+    }
+
+    // Logs Collection: Audit trail aktivitas sistem
+    match /logs/{logId} {
+      allow read: if true;
+      allow create: if request.resource.data.action is string &&
+                       request.resource.data.user is string;
+      allow update, delete: if true;
+    }
+
+    // Fallback default deny for any other unspecified paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

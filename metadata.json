@@ -1,0 +1,10 @@
+{
+  "name": "Remix NEXA15",
+  "description": "Intelligent QR code attendance system featuring real-time tracking and Gemini AI analysis for schools and educational institutions.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

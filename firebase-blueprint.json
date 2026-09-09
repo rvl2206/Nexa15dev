@@ -1,0 +1,229 @@
+{
+  "entities": {
+    "AppUser": {
+      "title": "AppUser",
+      "description": "Akun pengguna sistem NEXA15 (Admin, Guru Piket, Wali Kelas, Kepala Sekolah) dengan kata sandi terenkripsi bcrypt.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Unique identifier akun pengguna" },
+        "username": { "type": "string", "description": "Username unik untuk login" },
+        "email": { "type": "string", "description": "Alamat email resmi pengguna" },
+        "name": { "type": "string", "description": "Nama lengkap pengguna beserta gelar" },
+        "role": { "type": "string", "enum": ["Admin", "Guru", "Kepala Sekolah"], "description": "Hak akses utama sistem" },
+        "subRole": { "type": "string", "description": "Sub-peran seperti Guru Piket atau Wali Kelas" },
+        "assignedClass": { "type": "string", "description": "Kelas yang dibina jika bertugas sebagai Wali Kelas" },
+        "nip": { "type": "string", "description": "Nomor Induk Pegawai" },
+        "phone": { "type": "string", "description": "Nomor kontak WhatsApp" },
+        "password": { "type": "string", "description": "Hash kata sandi bcrypt yang aman" },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif"], "description": "Status aktifasi akun" },
+        "avatar": { "type": "string", "description": "URL foto avatar profil" },
+        "createdAt": { "type": "string", "description": "Waktu pembuatan akun ISO format" },
+        "updatedAt": { "type": "string", "description": "Waktu pembaruan akun ISO format" },
+        "lastLoginAt": { "type": "string", "description": "Waktu terakhir login" },
+        "notes": { "type": "string", "description": "Catatan administratif" }
+      },
+      "required": ["uid", "username", "name", "role", "password"]
+    },
+    "SchoolSettings": {
+      "title": "SchoolSettings",
+      "description": "Konfigurasi global sekolah termasuk profil, batas jam presensi, template WhatsApp, pemetaan Wali Kelas per kelas, dan hari libur.",
+      "type": "object",
+      "properties": {
+        "schoolName": { "type": "string", "description": "Nama resmi instansi sekolah" },
+        "schoolNPSN": { "type": "string", "description": "Nomor Pokok Sekolah Nasional" },
+        "schoolLogo": { "type": "string", "description": "URL / Base64 logo resmi sekolah" },
+        "cutoffTime": { "type": "string", "description": "Batas jam masuk tepat waktu (HH:mm)" },
+        "autoAlpaCutoffTime": { "type": "string", "description": "Batas jam otopresensi alpa (HH:mm)" },
+        "enableAutoAlpa": { "type": "boolean", "description": "Status aktifasi otopresensi alpa" },
+        "academicYear": { "type": "string", "description": "Tahun ajaran aktif" },
+        "enableWaNotif": { "type": "boolean", "description": "Status aktifasi pengiriman notifikasi WA" },
+        "waTemplateHadir": { "type": "string", "description": "Format teks pesan presensi hadir" },
+        "waTemplateTerlambat": { "type": "string", "description": "Format teks pesan presensi terlambat" },
+        "waTemplateIzinSakit": { "type": "string", "description": "Format teks pesan presensi izin/sakit" },
+        "waTemplateAlpa": { "type": "string", "description": "Format teks pesan presensi alpa" },
+        "waTemplateWaliKelas": { "type": "string", "description": "Format teks disposisi ke Wali Kelas" },
+        "holidays": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "tanggal": { "type": "string" },
+              "keterangan": { "type": "string" }
+            },
+            "required": ["id", "tanggal", "keterangan"]
+          },
+          "description": "Daftar tanggal merah dan libur khusus sekolah"
+        },
+        "homeroomAssignments": {
+          "type": "object",
+          "description": "Pemetaan kelas ke Wali Kelas (nama, NIP, no HP kontak)"
+        },
+        "problemThresholdAlpa": { "type": "number", "description": "Ambang batas alpa peringatan" },
+        "problemThresholdTerlambat": { "type": "number", "description": "Ambang batas terlambat peringatan" },
+        "problemThresholdMinRate": { "type": "number", "description": "Ambang batas minimal persentase presensi" },
+        "enableRfidReader": { "type": "boolean", "description": "Status aktifasi pemindai kartu RFID" },
+        "rfidReaderMode": { "type": "string", "description": "Mode komunikasi pembaca RFID" },
+        "rfidCardType": { "type": "string", "description": "Frekuensi kartu RFID" },
+        "rfidBeepFeedback": { "type": "boolean", "description": "Feedback audio nada beep" },
+        "rfidAutoRecord": { "type": "boolean", "description": "Auto presensi instan saat tap" },
+        "rfidAllowUnregisteredCardPrompt": { "type": "boolean", "description": "Prompt pendaftaran kartu baru" },
+        "updatedAt": { "type": "string", "description": "Waktu pembaruan konfigurasi" }
+      },
+      "required": ["schoolName", "cutoffTime"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Data master siswa peserta didik.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik internal siswa" },
+        "nisn": { "type": "string", "description": "Nomor Induk Siswa Nasional" },
+        "nama": { "type": "string", "description": "Nama lengkap siswa" },
+        "kelas": { "type": "string", "description": "Kelas atau rombel belajar siswa" },
+        "id_qr": { "type": "string", "description": "Kode QR terenkripsi kartu pelajar" },
+        "rfid_uid": { "type": "string", "description": "Nomor seri UID kartu RFID / NFC" },
+        "no_hp_ortu": { "type": "string", "description": "Nomor WhatsApp orang tua / wali" },
+        "foto": { "type": "string", "description": "URL foto profil siswa" },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif", "pindah", "lulus"], "description": "Status kesiswaan" },
+        "createdAt": { "type": "string", "description": "Waktu pendaftaran data" }
+      },
+      "required": ["id", "nisn", "nama", "kelas", "status"]
+    },
+    "Teacher": {
+      "title": "Teacher",
+      "description": "Data master guru dan tenaga kependidikan.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik internal guru" },
+        "nip": { "type": "string", "description": "Nomor Induk Pegawai / NUPTK" },
+        "nama": { "type": "string", "description": "Nama lengkap guru beserta gelar" },
+        "jabatan": { "type": "string", "description": "Jabatan dinas atau bidang studi" },
+        "id_qr": { "type": "string", "description": "Kode QR ID Card guru" },
+        "rfid_uid": { "type": "string", "description": "Nomor seri UID kartu RFID / NFC guru" },
+        "wali_kelas": { "type": "string", "description": "Kelas yang dibina sebagai wali kelas" },
+        "status": { "type": "string", "enum": ["aktif", "nonaktif"], "description": "Status kepegawaian" },
+        "no_hp": { "type": "string", "description": "Nomor WhatsApp pribadi guru" },
+        "foto": { "type": "string", "description": "URL pasfoto guru" },
+        "createdAt": { "type": "string", "description": "Waktu pendaftaran data" }
+      },
+      "required": ["id", "nip", "nama", "jabatan", "status"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Catatan log presensi harian siswa (Masuk, Hadir, Terlambat, Izin, Sakit, Alpa).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik rekaman presensi" },
+        "tanggal": { "type": "string", "description": "Tanggal presensi standar ISO format YYYY-MM-DD" },
+        "timestamp": { "type": "string", "description": "Waktu lengkap pemindaian ISO format" },
+        "nisn": { "type": "string", "description": "NISN siswa" },
+        "nama": { "type": "string", "description": "Nama siswa" },
+        "kelas": { "type": "string", "description": "Kelas siswa" },
+        "id_qr": { "type": "string", "description": "Kode QR yang dipindai" },
+        "rfid_uid": { "type": "string", "description": "UID kartu RFID yang ditap" },
+        "scan_method": { "type": "string", "enum": ["qr", "rfid", "manual", "auto"], "description": "Metode input presensi" },
+        "jenis": { "type": "string", "enum": ["Masuk", "Pulang"], "description": "Jenis presensi" },
+        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin", "Sakit", "Alpa"], "description": "Status kehadiran" },
+        "petugas": { "type": "string", "description": "Nama petugas piket atau sistem otopresensi" },
+        "catatan": { "type": "string", "description": "Keterangan tambahan" },
+        "terlambatMenit": { "type": "number", "description": "Durasi keterlambatan dalam menit" }
+      },
+      "required": ["id", "tanggal", "nisn", "nama", "kelas", "jenis", "status"]
+    },
+    "TeacherAttendanceRecord": {
+      "title": "TeacherAttendanceRecord",
+      "description": "Catatan log presensi harian guru dan tenaga kependidikan.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik rekaman presensi guru" },
+        "tanggal": { "type": "string", "description": "Tanggal presensi YYYY-MM-DD" },
+        "timestamp": { "type": "string", "description": "Waktu pemindaian ISO format" },
+        "nip": { "type": "string", "description": "NIP guru" },
+        "nama": { "type": "string", "description": "Nama guru" },
+        "jabatan": { "type": "string", "description": "Jabatan guru" },
+        "id_qr": { "type": "string", "description": "Kode QR guru" },
+        "rfid_uid": { "type": "string", "description": "UID kartu RFID guru" },
+        "scan_method": { "type": "string", "enum": ["qr", "rfid", "manual", "auto"], "description": "Metode input" },
+        "jenis": { "type": "string", "enum": ["Masuk", "Pulang"], "description": "Jenis presensi" },
+        "status": { "type": "string", "enum": ["Hadir", "Terlambat", "Izin", "Sakit", "Alpa", "Dinas Luar"], "description": "Status kehadiran" },
+        "petugas": { "type": "string", "description": "Nama pencatat" },
+        "catatan": { "type": "string", "description": "Catatan keterangan" },
+        "terlambatMenit": { "type": "number", "description": "Durasi keterlambatan menit" }
+      },
+      "required": ["id", "tanggal", "nip", "nama", "jabatan", "jenis", "status"]
+    },
+    "ProblematicStudentDispatch": {
+      "title": "ProblematicStudentDispatch",
+      "description": "Riwayat disposisi & laporan penanganan siswa bermasalah ke Wali Kelas dan Guru BK.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik disposisi penanganan" },
+        "nisn": { "type": "string", "description": "NISN siswa yang dilaporkan" },
+        "nama": { "type": "string", "description": "Nama lengkap siswa" },
+        "kelas": { "type": "string", "description": "Kelas siswa" },
+        "tanggal": { "type": "string", "description": "Tanggal disposisi dibuat" },
+        "timestamp": { "type": "string", "description": "Waktu penerbitan ISO format" },
+        "status": { "type": "string", "enum": ["Terkirim ke Wali Kelas", "Menunggu Tindak Lanjut", "Dalam Pembinaan BK", "Pemanggilan Orang Tua", "Selesai / Ditangani"], "description": "Status penanganan kasus" },
+        "recipientName": { "type": "string", "description": "Nama Wali Kelas / Guru BK penerima disposisi" },
+        "recipientPhone": { "type": "string", "description": "Nomor kontak WhatsApp penerima" },
+        "recipientRole": { "type": "string", "description": "Peran penerima (Wali Kelas / Guru BK)" },
+        "sentVia": { "type": "string", "enum": ["WhatsApp", "Slip Cetak", "Sistem Internal"], "description": "Kanal pengiriman disposisi" },
+        "messageText": { "type": "string", "description": "Isi lengkap instruksi / pemberitahuan" },
+        "notes": { "type": "string", "description": "Catatan perkembangan pembinaan" },
+        "handledBy": { "type": "string", "description": "Petugas / Guru yang memperbarui status" },
+        "resolvedAt": { "type": "string", "description": "Waktu penanganan diselesaikan" },
+        "issueSummary": { "type": "string", "description": "Ringkasan permasalahan ketidakhadiran" }
+      },
+      "required": ["id", "nisn", "nama", "kelas", "tanggal", "status"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit trail log aktivitas penting dan riwayat perubahan data sistem.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "ID unik catatan log aktivitas" },
+        "timestamp": { "type": "string", "description": "Waktu kejadian log ISO format" },
+        "user": { "type": "string", "description": "Nama operator / pengguna yang bertindak" },
+        "role": { "type": "string", "description": "Role operator" },
+        "action": { "type": "string", "description": "Kode aksi (contoh: TAMBAH_SISWA, EDIT_GURU, DISPOSISI_WALI_KELAS)" },
+        "details": { "type": "string", "description": "Deskripsi rincian aktivitas" }
+      },
+      "required": ["id", "timestamp", "user", "action", "details"]
+    }
+  },
+  "firestore": {
+    "/app_users/{userId}": {
+      "schema": { "$ref": "#/entities/AppUser" },
+      "description": "Koleksi akun pengguna dengan keamanan enkripsi bcrypt."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SchoolSettings" },
+      "description": "Dokumen konfigurasi sekolah dan pemetaan Wali Kelas (school_config)."
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Koleksi data master peserta didik."
+    },
+    "/teachers/{teacherId}": {
+      "schema": { "$ref": "#/entities/Teacher" },
+      "description": "Koleksi data master guru & tenaga kependidikan."
+    },
+    "/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Koleksi rekaman presensi harian siswa."
+    },
+    "/teacher_attendance/{teacherAttendanceId}": {
+      "schema": { "$ref": "#/entities/TeacherAttendanceRecord" },
+      "description": "Koleksi rekaman presensi harian guru."
+    },
+    "/dispatches/{dispatchId}": {
+      "schema": { "$ref": "#/entities/ProblematicStudentDispatch" },
+      "description": "Koleksi disposisi tindak lanjut siswa bermasalah ke Wali Kelas & BK."
+    },
+    "/logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Koleksi audit trail riwayat aktivitas sistem."
+    }
+  }
+}

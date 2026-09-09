@@ -1,0 +1,16 @@
+{
+  "short_name": "NEXA15",
+  "name": "NEXA15 - Presensi Digital SMAN 15 Ambon",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0f172a",
+  "theme_color": "#1e3a8a",
+  "display": "standalone",
+  "orientation": "portrait"
+}
