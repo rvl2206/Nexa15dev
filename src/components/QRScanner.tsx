@@ -57,6 +57,7 @@ import {
   Maximize2,
   Focus,
   Crosshair,
+  ExternalLink,
 } from 'lucide-react';
 import { toast } from '../lib/toast';
 
@@ -123,6 +124,10 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const [isHardwareZoomSupported, setIsHardwareZoomSupported] = useState<boolean>(false);
   const [activeEngineLabel, setActiveEngineLabel] = useState<string>('Dual Turbo Engine (GPU + jsQR)');
   const [tapFocusCoord, setTapFocusCoord] = useState<{ x: number; y: number } | null>(null);
+  const [cameraPermissionStatus, setCameraPermissionStatus] = useState<'prompt' | 'granted' | 'denied' | 'error'>('prompt');
+  const [cameraErrorMessage, setCameraErrorMessage] = useState<string>('');
+  const [isRequestingPermission, setIsRequestingPermission] = useState<boolean>(false);
+  const [showPermissionGuide, setShowPermissionGuide] = useState<boolean>(false);
 
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
   const turboScanFrameIdRef = useRef<number | null>(null);
@@ -358,6 +363,57 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       }
     } catch (e) {
       console.log('Failed to enumerate video devices:', e);
+    }
+  };
+
+  const requestCameraAccess = async () => {
+    setIsRequestingPermission(true);
+    setCameraErrorMessage('');
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Browser atau perangkat ini tidak mendukung API kamera WebRTC.');
+      }
+      // Request simple permission stream to prompt browser dialog
+      const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
+      testStream.getTracks().forEach((track) => track.stop());
+
+      setCameraPermissionStatus('granted');
+      setShowPermissionGuide(false);
+      await fetchAvailableCameras();
+      await startCamera();
+      toast.success('Izin Kamera Diberikan', 'Kamera berhasil diizinkan dan siap digunakan untuk scan.');
+    } catch (err: any) {
+      console.error('Camera permission request error:', err);
+      const errName = err?.name || '';
+      const errMsg = err?.message || '';
+
+      if (
+        errName === 'NotAllowedError' ||
+        errName === 'PermissionDeniedError' ||
+        errMsg.toLowerCase().includes('permission') ||
+        errMsg.toLowerCase().includes('denied')
+      ) {
+        setCameraPermissionStatus('denied');
+        setCameraErrorMessage(
+          'Izin akses kamera diblokir atau ditolak di browser. Silakan izinkan akses kamera melalui ikon gembok/pengaturan situs di samping URL browser.'
+        );
+        setShowPermissionGuide(true);
+        toast.error('Izin Kamera Ditolak', 'Akses kamera diblokir browser. Buka setelan situs untuk mengizinkan.');
+      } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+        setCameraPermissionStatus('error');
+        setCameraErrorMessage('Tidak ada kamera yang terdeteksi pada perangkat ini.');
+        toast.error('Kamera Tidak Ditemukan', 'Pastikan kamera HP atau webcam laptop terhubung.');
+      } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
+        setCameraPermissionStatus('error');
+        setCameraErrorMessage('Kamera sedang aktif digunakan oleh aplikasi lain (seperti Zoom, Google Meet, WhatsApp, atau tab lain). Tutup aplikasi tersebut.');
+        toast.error('Kamera Sibuk', 'Tutup aplikasi lain yang sedang menggunakan kamera.');
+      } else {
+        setCameraPermissionStatus('error');
+        setCameraErrorMessage(errMsg || 'Gagal memperoleh izin kamera.');
+        toast.error('Gagal Mengakses Kamera', errMsg || 'Periksa pengaturan kamera perangkat Anda.');
+      }
+    } finally {
+      setIsRequestingPermission(false);
     }
   };
 
@@ -912,19 +968,13 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const startCamera = async (camIdOverride?: string) => {
     try {
       await stopCamera();
-      setIsCameraActive(true);
       setScanResult(null);
+      setCameraErrorMessage('');
 
       // Brief DOM mount pause
       await new Promise((resolve) => setTimeout(resolve, 150));
 
       const targetCamId = camIdOverride || selectedCameraId;
-
-      const html5QrCode = new Html5Qrcode('reader', {
-        formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
-        verbose: false,
-      });
-      scannerRef.current = html5QrCode;
 
       const config = {
         fps: scanFps,
@@ -936,40 +986,105 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         disableFlip: false,
       };
 
-      // Full HD 1080p stream with Continuous Autofocus & Macro preference
-      const cameraConstraint = targetCamId
-        ? {
-            deviceId: { exact: targetCamId },
-            width: { min: 1280, ideal: 1920, max: 2560 },
-            height: { min: 720, ideal: 1080, max: 1440 },
-            facingMode: 'environment',
-            focusMode: 'continuous',
-            advanced: [
-              { focusMode: 'continuous' } as any,
-              { focusDistance: { ideal: 0.15 } } as any,
-            ],
-          }
-        : {
-            facingMode: 'environment',
-            width: { min: 1280, ideal: 1920, max: 2560 },
-            height: { min: 720, ideal: 1080, max: 1440 },
-            focusMode: 'continuous',
-            advanced: [
-              { focusMode: 'continuous' } as any,
-              { focusDistance: { ideal: 0.15 } } as any,
-            ],
-          };
+      // Progressive fallback constraints: Start with sharpest FHD, fallback gracefully down to standard/any camera
+      // Crucial: Avoid hard 'min' constraints and never mix 'deviceId' with 'facingMode' to avoid OverconstrainedError!
+      const candidateConstraints: any[] = [];
 
-      await html5QrCode.start(
-        cameraConstraint,
-        config,
-        (decodedText) => {
-          processScannedCode(decodedText);
-        },
-        () => {
-          // Ignore parse frames
+      if (targetCamId) {
+        // Candidate 1: Selected camera with ideal Full HD 1080p
+        candidateConstraints.push({
+          deviceId: { exact: targetCamId },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        });
+        // Candidate 2: Selected camera default resolution
+        candidateConstraints.push({
+          deviceId: { exact: targetCamId },
+        });
+      }
+
+      // Candidate 3: Rear (environment) camera with ideal Full HD 1080p
+      candidateConstraints.push({
+        facingMode: 'environment',
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      });
+
+      // Candidate 4: Rear camera standard
+      candidateConstraints.push({
+        facingMode: 'environment',
+      });
+
+      // Candidate 5: Front camera or laptop webcam
+      candidateConstraints.push({
+        facingMode: 'user',
+      });
+
+      // Candidate 6: Absolute universal fallback
+      candidateConstraints.push({});
+
+      let started = false;
+      let lastErr: any = null;
+
+      for (let i = 0; i < candidateConstraints.length; i++) {
+        const constraint = candidateConstraints[i];
+        try {
+          // Recreate clean Html5Qrcode instance
+          if (!scannerRef.current) {
+            scannerRef.current = new Html5Qrcode('reader', {
+              formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
+              verbose: false,
+            });
+          }
+
+          await scannerRef.current.start(
+            constraint,
+            config,
+            (decodedText) => {
+              processScannedCode(decodedText);
+            },
+            () => {
+              // Ignore frame parse misses
+            }
+          );
+
+          started = true;
+          setIsCameraActive(true);
+          setCameraPermissionStatus('granted');
+          setCameraErrorMessage('');
+          setShowPermissionGuide(false);
+          break;
+        } catch (err: any) {
+          lastErr = err;
+          const errName = err?.name || '';
+          const errMsg = err?.message || '';
+
+          // If browser explicitly rejected camera permission, abort constraint fallback
+          if (
+            errName === 'NotAllowedError' ||
+            errName === 'PermissionDeniedError' ||
+            errMsg.toLowerCase().includes('permission') ||
+            errMsg.toLowerCase().includes('denied')
+          ) {
+            setCameraPermissionStatus('denied');
+            setCameraErrorMessage('Izin kamera ditolak oleh browser. Silakan klik "Minta Izin Ulang" atau ubah izin situs di browser.');
+            setShowPermissionGuide(true);
+            throw err;
+          }
+
+          // Reset scanner before trying next constraint
+          try {
+            if (scannerRef.current && scannerRef.current.isScanning) {
+              await scannerRef.current.stop();
+            }
+          } catch {}
+          scannerRef.current = null;
         }
-      );
+      }
+
+      if (!started) {
+        throw lastErr || new Error('Gagal membuka aliran video kamera setelah beberapa konfigurasi.');
+      }
 
       // Inspect hardware stream track capabilities and apply initial Zoom & Macro configuration
       setTimeout(() => {
@@ -1017,7 +1132,23 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     } catch (err: any) {
       console.error('Camera activation error:', err);
       setIsCameraActive(false);
-      toast.error('Gagal Mengaktifkan Kamera', err.message || 'Periksa izin kamera di browser Anda.');
+      const errName = err?.name || '';
+      const errMsg = err?.message || '';
+
+      if (
+        errName === 'NotAllowedError' ||
+        errName === 'PermissionDeniedError' ||
+        errMsg.toLowerCase().includes('permission') ||
+        errMsg.toLowerCase().includes('denied')
+      ) {
+        setCameraPermissionStatus('denied');
+        setShowPermissionGuide(true);
+        toast.error('Izin Kamera Ditolak', 'Akses kamera diblokir browser. Buka setelan izin situs untuk mengaktifkan.');
+      } else {
+        setCameraPermissionStatus('error');
+        setCameraErrorMessage(errMsg || 'Kamera tidak dapat dimulai.');
+        toast.error('Gagal Mengaktifkan Kamera', errMsg || 'Periksa koneksi kamera di browser Anda.');
+      }
     }
   };
 
@@ -1468,23 +1599,120 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
             )}
 
             {!isCameraActive && (
-              <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center text-center p-6 space-y-3 z-10">
-                <div className="w-16 h-16 rounded-2xl bg-blue-600/20 text-cyan-400 border border-blue-500/30 flex items-center justify-center shadow-md">
-                  <QrCode className="w-8 h-8" />
-                </div>
-                <div>
-                  <h3 className="text-white font-bold text-base">Kamera Siap Diaktifkan</h3>
-                  <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                    Kamera Full HD dengan akselerasi GPU BarcodeDetector & Zoom Cerdas untuk QR kecil.
-                  </p>
-                </div>
-                <button
-                  onClick={() => startCamera()}
-                  className="mt-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
-                >
-                  <Camera className="w-4 h-4" />
-                  <span>Mulai Scan Kamera (FHD)</span>
-                </button>
+              <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center text-center p-5 z-10 overflow-y-auto">
+                {cameraPermissionStatus === 'denied' || showPermissionGuide ? (
+                  <div className="flex flex-col items-center space-y-3 max-w-sm w-full">
+                    <div className="w-14 h-14 rounded-2xl bg-rose-500/20 text-rose-400 border border-rose-500/40 flex items-center justify-center shadow-lg animate-pulse">
+                      <CameraOff className="w-7 h-7" />
+                    </div>
+                    <div>
+                      <h3 className="text-white font-extrabold text-sm sm:text-base flex items-center justify-center gap-1.5 text-rose-400">
+                        <ShieldAlert className="w-4 h-4" />
+                        <span>Izin Kamera Diperlukan</span>
+                      </h3>
+                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                        Browser memblokir atau belum mengizinkan akses ke kamera. Silakan buka izin kamera untuk mulai memindai QR code.
+                      </p>
+                    </div>
+
+                    {/* Step by step browser instruction card */}
+                    <div className="w-full text-left bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-[11px] text-slate-300 space-y-2 shadow-inner">
+                      <div className="font-bold text-amber-400 flex items-center gap-1 text-[11px]">
+                        <Info className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+                        <span>Langkah Membuka Izin di Browser:</span>
+                      </div>
+                      <div className="text-[10px] leading-relaxed text-slate-300 space-y-1.5">
+                        <p>
+                          <strong className="text-amber-300">1. Google Chrome & Edge:</strong> Ketuk ikon <strong className="text-white">🔒 (gembok)</strong> atau tombol setelan situs di samping kiri bilah URL ➔ Pilih <strong className="text-white">Izin Situs</strong> ➔ Ubah Kamera dari "Blokir" menjadi <strong className="text-emerald-400">"Izinkan" (Allow)</strong> ➔ Muat ulang halaman.
+                        </p>
+                        <p>
+                          <strong className="text-amber-300">2. Safari (iPhone / iPad):</strong> Buka <strong className="text-white">Pengaturan iOS</strong> ➔ Safari ➔ Kamera ➔ Pilih <strong className="text-emerald-400">"Izinkan"</strong>.
+                        </p>
+                        <p>
+                          <strong className="text-amber-300">3. Mode Pratinjau / Frame:</strong> Buka aplikasi di tab baru agar kamera tidak dibatasi oleh iframe.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col w-full gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => requestCameraAccess()}
+                        disabled={isRequestingPermission}
+                        className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${isRequestingPermission ? 'animate-spin' : ''}`} />
+                        <span>{isRequestingPermission ? 'Meminta Akses Kamera...' : 'Minta Ulang Izin Kamera'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => window.open(window.location.href, '_blank')}
+                        className="w-full py-2 px-3 bg-blue-600/90 hover:bg-blue-600 text-white font-bold text-xs rounded-xl border border-blue-500/50 shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer"
+                        title="Buka aplikasi langsung di tab baru browser untuk mengatasi batasan frame / sandbox"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 text-blue-200" />
+                        <span>Buka Aplikasi di Tab Baru</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowPermissionGuide(false);
+                          setCameraPermissionStatus('prompt');
+                        }}
+                        className="text-[11px] text-slate-400 hover:text-slate-200 underline mt-0.5 cursor-pointer"
+                      >
+                        Tutup Panduan & Coba Mulai Lagi
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center space-y-3">
+                    <div className="w-16 h-16 rounded-2xl bg-blue-600/20 text-cyan-400 border border-blue-500/30 flex items-center justify-center shadow-md">
+                      <QrCode className="w-8 h-8" />
+                    </div>
+                    <div>
+                      <h3 className="text-white font-bold text-base">Kamera Siap Diaktifkan</h3>
+                      <p className="text-xs text-slate-400 mt-1 max-w-xs">
+                        Kamera Full HD dengan akselerasi GPU BarcodeDetector & Zoom Cerdas untuk QR kecil.
+                      </p>
+                      {cameraErrorMessage && (
+                        <p className="text-xs text-rose-400 mt-1.5 max-w-xs font-semibold bg-rose-950/60 border border-rose-800/60 px-2 py-1 rounded-lg">
+                          {cameraErrorMessage}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex flex-col items-center gap-2 w-full max-w-xs pt-1">
+                      <button
+                        onClick={() => startCamera()}
+                        className="w-full px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                      >
+                        <Camera className="w-4 h-4" />
+                        <span>Mulai Scan Kamera (FHD)</span>
+                      </button>
+                      <div className="flex items-center justify-center gap-3 text-[11px] pt-1">
+                        <button
+                          type="button"
+                          onClick={() => requestCameraAccess()}
+                          className="text-blue-400 hover:text-blue-300 underline font-medium cursor-pointer flex items-center gap-1"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>Uji Izin Kamera</span>
+                        </button>
+                        <span className="text-slate-600">•</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowPermissionGuide(true)}
+                          className="text-amber-400 hover:text-amber-300 underline font-medium cursor-pointer flex items-center gap-1"
+                        >
+                          <Info className="w-3.5 h-3.5" />
+                          <span>Panduan Izin</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1616,6 +1844,19 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                   {fps} FPS
                 </button>
               ))}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPermissionGuide(true);
+                  if (isCameraActive) stopCamera();
+                }}
+                className="ml-1 px-2 py-0.5 text-[10px] font-extrabold rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 hover:bg-amber-100 transition-all flex items-center gap-1 cursor-pointer"
+                title="Bantuan & Solusi jika izin kamera diblokir atau gagal dibuka"
+              >
+                <ShieldAlert className="w-3 h-3" />
+                <span>Bantuan Izin Kamera</span>
+              </button>
             </div>
           </div>
 
