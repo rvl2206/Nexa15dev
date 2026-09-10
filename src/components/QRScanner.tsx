@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import jsQR from 'jsqr';
 import { store } from '../lib/store';
 import {
   Student,
@@ -50,6 +51,12 @@ import {
   Wifi,
   WifiOff,
   CreditCard,
+  ZoomIn,
+  ZoomOut,
+  Sun,
+  Maximize2,
+  Focus,
+  Crosshair,
 } from 'lucide-react';
 import { toast } from '../lib/toast';
 
@@ -99,14 +106,29 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   // Performance & Queue Options - Mode Scan Massal starts DISABLED so popup info shows for 3 seconds
   const [rapidQueueMode, setRapidQueueMode] = useState<boolean>(false); // Mode Antrean Cepat (false by default)
   const [debounceSeconds, setDebounceSeconds] = useState<number>(3); // 3 seconds debounce per same QR
-  const [scanFps, setScanFps] = useState<number>(15); // 15 FPS
+  const [scanFps, setScanFps] = useState<number>(20); // 20 FPS high responsiveness
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [modalDuration, setModalDuration] = useState<number>(3); // Durasi popup 3 detik
 
-  // Camera Devices
+  // Camera Devices & Hardware Capabilities
   const [availableCameras, setAvailableCameras] = useState<Array<{ id: string; label: string }>>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>('');
   const [scanFlash, setScanFlash] = useState<boolean>(false);
+
+  // Schema 1: Turbo Digital Zoom & Small QR Enhancements
+  const [zoomLevel, setZoomLevel] = useState<number>(1.5); // Default 1.5x zoom so tiny QRs are captured instantly without macro blur
+  const [macroMode, setMacroMode] = useState<boolean>(true); // Mode Makro QR Kecil aktif default
+  const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
+  const [isTorchSupported, setIsTorchSupported] = useState<boolean>(false);
+  const [isHardwareZoomSupported, setIsHardwareZoomSupported] = useState<boolean>(false);
+  const [activeEngineLabel, setActiveEngineLabel] = useState<string>('Dual Turbo Engine (GPU + jsQR)');
+  const [tapFocusCoord, setTapFocusCoord] = useState<{ x: number; y: number } | null>(null);
+
+  const videoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const turboScanFrameIdRef = useRef<number | null>(null);
+  const turboCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const barcodeDetectorRef = useRef<any>(null);
+  const lastParallelScanTimeRef = useRef<number>(0);
 
   const [countdown, setCountdown] = useState<number>(3);
   const [lastScannedQR, setLastScannedQR] = useState<string>('');
@@ -719,6 +741,174 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     setSelectedTeacherForQR('');
   };
 
+  // Check Native BarcodeDetector API availability on load
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
+      try {
+        (window as any).BarcodeDetector.getSupportedFormats()
+          .then((formats: string[]) => {
+            if (formats && formats.includes('qr_code')) {
+              barcodeDetectorRef.current = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
+              setActiveEngineLabel('Native GPU BarcodeDetector ⚡');
+            } else {
+              setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
+            }
+          })
+          .catch(() => {
+            setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
+          });
+      } catch {
+        setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
+      }
+    } else {
+      setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
+    }
+  }, []);
+
+  const handleApplyZoom = async (newZoom: number) => {
+    setZoomLevel(newZoom);
+    if (videoTrackRef.current) {
+      try {
+        const caps = videoTrackRef.current.getCapabilities ? (videoTrackRef.current.getCapabilities() as any) : {};
+        if (caps && caps.zoom) {
+          const minZ = caps.zoom.min || 1;
+          const maxZ = caps.zoom.max || 5;
+          const clampedZoom = Math.min(Math.max(newZoom, minZ), maxZ);
+          await videoTrackRef.current.applyConstraints({
+            advanced: [{ zoom: clampedZoom } as any],
+          });
+        }
+      } catch (e) {
+        console.log('Hardware zoom not available, using digital ROI crop', e);
+      }
+    }
+
+    // Apply instantaneous visual scale transform to video element
+    const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
+    if (videoEl) {
+      videoEl.style.transform = `scale(${newZoom})`;
+      videoEl.style.transformOrigin = 'center center';
+      videoEl.style.transition = 'transform 0.2s ease-out';
+    }
+  };
+
+  const handleToggleTorch = async () => {
+    if (!videoTrackRef.current) {
+      toast.warning('Kamera Belum Aktif', 'Aktifkan kamera terlebih dahulu untuk menyalakan lampu flash.');
+      return;
+    }
+    try {
+      const nextTorch = !isTorchOn;
+      await videoTrackRef.current.applyConstraints({
+        advanced: [{ torch: nextTorch } as any],
+      });
+      setIsTorchOn(nextTorch);
+      if (nextTorch) {
+        toast.success('Lampu Flash Aktif', 'Pencahayaan kamera diaktifkan untuk scan di ruangan gelap.');
+      } else {
+        toast.info('Lampu Flash Mati', 'Pencahayaan flash dinonaktifkan.');
+      }
+    } catch (err: any) {
+      console.log('Torch error:', err);
+      toast.error('Flash Tidak Didukung', 'Sensor lampu flash tidak dapat diaktifkan pada kamera ini.');
+    }
+  };
+
+  const handleToggleMacroMode = () => {
+    const nextMode = !macroMode;
+    setMacroMode(nextMode);
+    if (nextMode) {
+      handleApplyZoom(2.0);
+      toast.success('Mode Makro Aktif (2.0x Zoom)', 'Kamera dioptimalkan khusus untuk membaca QR Code berukuran kecil atau dari jarak nyaman.');
+    } else {
+      handleApplyZoom(1.0);
+      toast.info('Mode Standar Aktif (1.0x Zoom)', 'Zoom kamera dikembalikan ke sudut normal.');
+    }
+  };
+
+  const handleViewfinderClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    setTapFocusCoord({ x, y });
+    setTimeout(() => setTapFocusCoord(null), 1200);
+
+    if (videoTrackRef.current) {
+      try {
+        videoTrackRef.current.applyConstraints({
+          advanced: [{ focusMode: 'continuous' } as any],
+        }).catch(() => {});
+      } catch {}
+    }
+  };
+
+  const startTurboScanLoop = () => {
+    if (turboScanFrameIdRef.current) {
+      cancelAnimationFrame(turboScanFrameIdRef.current);
+      turboScanFrameIdRef.current = null;
+    }
+
+    const scanFrame = () => {
+      if (!scannerRef.current) return;
+
+      const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
+      if (videoEl && videoEl.readyState >= 2 && !videoEl.paused && !videoEl.ended) {
+        const now = performance.now();
+        // Scan every ~40-50ms for hyper-fast response
+        if (now - lastParallelScanTimeRef.current >= 45 && !isProcessingRef.current) {
+          lastParallelScanTimeRef.current = now;
+
+          // Engine 1: Native GPU-Accelerated BarcodeDetector (Chrome/Android/Edge)
+          if (barcodeDetectorRef.current) {
+            barcodeDetectorRef.current
+              .detect(videoEl)
+              .then((barcodes: any[]) => {
+                if (barcodes && barcodes.length > 0) {
+                  const val = barcodes[0].rawValue || barcodes[0].displayValue;
+                  if (val) processScannedCode(val);
+                }
+              })
+              .catch(() => {});
+          }
+
+          // Engine 2: Turbo jsQR Multi-Scale & High-Resolution Center Crop (Ultra Sharp for Micro QR)
+          if (!turboCanvasRef.current) {
+            turboCanvasRef.current = document.createElement('canvas');
+          }
+          const canvas = turboCanvasRef.current;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (ctx) {
+            const vw = videoEl.videoWidth || 1280;
+            const vh = videoEl.videoHeight || 720;
+
+            // Crop central 55% Region Of Interest (ROI) for 2x crisp optical magnification
+            const cropW = Math.floor(vw * 0.55);
+            const cropH = Math.floor(vh * 0.55);
+            const cropX = Math.floor((vw - cropW) / 2);
+            const cropY = Math.floor((vh - cropH) / 2);
+
+            canvas.width = cropW;
+            canvas.height = cropH;
+
+            ctx.drawImage(videoEl, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+            const imgData = ctx.getImageData(0, 0, cropW, cropH);
+            const code = jsQR(imgData.data, cropW, cropH, {
+              inversionAttempts: 'attemptBoth',
+            });
+
+            if (code && code.data) {
+              processScannedCode(code.data);
+            }
+          }
+        }
+      }
+
+      turboScanFrameIdRef.current = requestAnimationFrame(scanFrame);
+    };
+
+    turboScanFrameIdRef.current = requestAnimationFrame(scanFrame);
+  };
+
   const startCamera = async (camIdOverride?: string) => {
     try {
       await stopCamera();
@@ -739,16 +929,36 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       const config = {
         fps: scanFps,
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          const edgeSize = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.75);
+          const edgeSize = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.85);
           return { width: edgeSize, height: edgeSize };
         },
         aspectRatio: 1.0,
         disableFlip: false,
       };
 
+      // Full HD 1080p stream with Continuous Autofocus & Macro preference
       const cameraConstraint = targetCamId
-        ? { deviceId: { exact: targetCamId } }
-        : { facingMode: 'environment' };
+        ? {
+            deviceId: { exact: targetCamId },
+            width: { min: 1280, ideal: 1920, max: 2560 },
+            height: { min: 720, ideal: 1080, max: 1440 },
+            facingMode: 'environment',
+            focusMode: 'continuous',
+            advanced: [
+              { focusMode: 'continuous' } as any,
+              { focusDistance: { ideal: 0.15 } } as any,
+            ],
+          }
+        : {
+            facingMode: 'environment',
+            width: { min: 1280, ideal: 1920, max: 2560 },
+            height: { min: 720, ideal: 1080, max: 1440 },
+            focusMode: 'continuous',
+            advanced: [
+              { focusMode: 'continuous' } as any,
+              { focusDistance: { ideal: 0.15 } } as any,
+            ],
+          };
 
       await html5QrCode.start(
         cameraConstraint,
@@ -760,13 +970,62 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
           // Ignore parse frames
         }
       );
+
+      // Inspect hardware stream track capabilities and apply initial Zoom & Macro configuration
+      setTimeout(() => {
+        try {
+          const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
+          if (videoEl) {
+            const stream = (videoEl as any).srcObject as MediaStream;
+            if (stream) {
+              const track = stream.getVideoTracks()[0];
+              if (track) {
+                videoTrackRef.current = track;
+                const caps = track.getCapabilities ? (track.getCapabilities() as any) : {};
+                if (caps && caps.torch) {
+                  setIsTorchSupported(true);
+                }
+                if (caps && caps.zoom) {
+                  setIsHardwareZoomSupported(true);
+                  const initialZ = macroMode ? 2.0 : zoomLevel;
+                  track.applyConstraints({
+                    advanced: [{ zoom: initialZ } as any],
+                  }).catch(() => {});
+                }
+                // Continuous Autofocus lock
+                try {
+                  track.applyConstraints({
+                    advanced: [{ focusMode: 'continuous' } as any],
+                  }).catch(() => {});
+                } catch {}
+              }
+            }
+
+            // Visual zoom scaling
+            const initialZoomVal = macroMode ? 2.0 : zoomLevel;
+            videoEl.style.transform = `scale(${initialZoomVal})`;
+            videoEl.style.transformOrigin = 'center center';
+            videoEl.style.transition = 'transform 0.2s ease-out';
+          }
+        } catch (e) {
+          console.log('Track capabilities inspection info:', e);
+        }
+
+        // Start turbo parallel scanner loop
+        startTurboScanLoop();
+      }, 250);
     } catch (err: any) {
       console.error('Camera activation error:', err);
       setIsCameraActive(false);
+      toast.error('Gagal Mengaktifkan Kamera', err.message || 'Periksa izin kamera di browser Anda.');
     }
   };
 
   const stopCamera = async () => {
+    if (turboScanFrameIdRef.current) {
+      cancelAnimationFrame(turboScanFrameIdRef.current);
+      turboScanFrameIdRef.current = null;
+    }
     if (scannerRef.current && scannerRef.current.isScanning) {
       try {
         await scannerRef.current.stop();
@@ -775,6 +1034,15 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         console.log('Scanner stop error:', e);
       }
     }
+    if (videoTrackRef.current) {
+      try {
+        if (isTorchOn) {
+          videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] }).catch(() => {});
+        }
+      } catch {}
+      videoTrackRef.current = null;
+    }
+    setIsTorchOn(false);
     scannerRef.current = null;
     setIsCameraActive(false);
   };
@@ -1115,7 +1383,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
 
           {/* Video Container Box */}
           <div
-            className={`w-full max-w-md aspect-square bg-slate-950 rounded-2xl border-2 overflow-hidden relative flex items-center justify-center shadow-inner transition-all ${
+            onClick={isCameraActive ? handleViewfinderClick : undefined}
+            className={`w-full max-w-md aspect-square bg-slate-950 rounded-2xl border-2 overflow-hidden relative flex items-center justify-center shadow-inner transition-all cursor-crosshair ${
               scanFlash
                 ? 'border-emerald-400 ring-4 ring-emerald-400/30'
                 : 'border-dashed border-slate-700'
@@ -1124,12 +1393,71 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
             {/* Target element for html5-qrcode */}
             <div id="reader" className="w-full h-full"></div>
 
+            {/* Tap-to-Focus Reticle Visual Indicator */}
+            {tapFocusCoord && isCameraActive && (
+              <div
+                className="absolute z-40 pointer-events-none -translate-x-1/2 -translate-y-1/2 transition-all"
+                style={{ left: tapFocusCoord.x, top: tapFocusCoord.y }}
+              >
+                <div className="w-12 h-12 border-2 border-amber-400 rounded-lg animate-ping opacity-80" />
+                <div className="w-8 h-8 border-2 border-emerald-400 rounded-lg absolute inset-2 flex items-center justify-center">
+                  <Crosshair className="w-4 h-4 text-emerald-400" />
+                </div>
+              </div>
+            )}
+
             {/* Offline Viewfinder Warning Overlay Badge */}
             {!isOnline && isCameraActive && (
               <div className="absolute top-3 inset-x-3 z-30 pointer-events-none">
                 <div className="bg-amber-950/90 text-amber-200 backdrop-blur-md px-3 py-1.5 rounded-xl border border-amber-500/60 shadow-lg flex items-center justify-center gap-2 text-center text-[11px] font-extrabold tracking-wide animate-pulse">
                   <WifiOff className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
                   <span>MODE OFFLINE: KONEKSI TERPUTUS • SCAN DISIMPAN LOKAL</span>
+                </div>
+              </div>
+            )}
+
+            {/* In-Viewfinder Top Control Badges & Flashlight button */}
+            {isCameraActive && (
+              <div className="absolute top-3 inset-x-3 z-30 flex items-center justify-between gap-2 pointer-events-auto">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-slate-900/85 backdrop-blur-md text-emerald-400 border border-emerald-500/40 shadow-xs flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" />
+                    <span>FHD 1080p ⚡ GPU</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleMacroMode();
+                    }}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-black transition-all border shadow-xs flex items-center gap-1 cursor-pointer ${
+                      macroMode
+                        ? 'bg-amber-500/90 text-slate-950 border-amber-400 ring-2 ring-amber-400/40 font-black'
+                        : 'bg-slate-900/80 text-slate-300 border-slate-700 hover:text-white'
+                    }`}
+                    title="Aktifkan Mode Makro (2.0x Zoom) untuk membaca QR Code berukuran kecil dari jarak aman"
+                  >
+                    <Focus className="w-3 h-3" />
+                    <span>Makro QR: {macroMode ? '2.0x (Aktif)' : 'Off'}</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleToggleTorch();
+                    }}
+                    className={`p-1.5 rounded-lg text-xs font-bold transition-all border shadow-sm cursor-pointer ${
+                      isTorchOn
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 ring-2 ring-amber-300/50'
+                        : 'bg-slate-900/80 text-slate-300 border-slate-700 hover:text-white hover:bg-slate-800'
+                    }`}
+                    title={isTorchOn ? 'Matikan Lampu Flash' : 'Nyalakan Lampu Flash'}
+                  >
+                    <Sun className={`w-3.5 h-3.5 ${isTorchOn ? 'fill-current animate-spin' : ''}`} />
+                  </button>
                 </div>
               </div>
             )}
@@ -1147,18 +1475,59 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                 <div>
                   <h3 className="text-white font-bold text-base">Kamera Siap Diaktifkan</h3>
                   <p className="text-xs text-slate-400 mt-1 max-w-xs">
-                    Klik tombol di bawah untuk membuka pemindaian kamera secara langsung.
+                    Kamera Full HD dengan akselerasi GPU BarcodeDetector & Zoom Cerdas untuk QR kecil.
                   </p>
                 </div>
                 <button
                   onClick={() => startCamera()}
-                  className="mt-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
+                  className="mt-2 px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer active:scale-95"
                 >
                   <Camera className="w-4 h-4" />
-                  <span>Mulai Scan Kamera Now</span>
+                  <span>Mulai Scan Kamera (FHD)</span>
                 </button>
               </div>
             )}
+          </div>
+
+          {/* Quick Digital Zoom Control Bar for Small QR Codes */}
+          {isCameraActive && (
+            <div className="w-full mt-3 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700/80 flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-slate-200">
+                <ZoomIn className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span>Zoom Kamera Cerdas:</span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {[
+                  { label: '1.0x', val: 1.0, desc: 'Standar' },
+                  { label: '1.5x', val: 1.5, desc: 'Optimal' },
+                  { label: '2.0x', val: 2.0, desc: 'QR Kecil (Saran)' },
+                  { label: '2.5x', val: 2.5, desc: 'QR Mikro' },
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    onClick={() => handleApplyZoom(item.val)}
+                    className={`px-2.5 py-1 text-[11px] font-extrabold rounded-lg transition-all border cursor-pointer ${
+                      zoomLevel === item.val
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-xs ring-2 ring-blue-400/20'
+                        : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    }`}
+                    title={`Pilih perbesaran ${item.label} (${item.desc})`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Small QR Guidance Banner */}
+          <div className="w-full mt-2.5 px-3 py-2 bg-blue-50/70 dark:bg-blue-950/40 border border-blue-200/80 dark:border-blue-800/60 rounded-xl text-[11px] text-blue-950 dark:text-blue-200 flex items-start gap-2">
+            <Info className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+            <p className="leading-snug">
+              <span className="font-bold">Tips Membaca QR Kecil Instan (&lt;0.5 detik):</span> Tahan kartu pada jarak <span className="font-bold underline">25–35 cm</span> di tengah kotak kamera (jangan terlalu dekat agar tidak buram). Gunakan <span className="font-bold text-blue-700 dark:text-blue-300">Zoom 1.5x atau 2.0x</span> untuk pembacaan otomatis berkecepatan tinggi.
+            </p>
           </div>
 
           {/* Camera Settings & Tuning Bar */}

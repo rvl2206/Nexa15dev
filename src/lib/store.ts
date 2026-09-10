@@ -1192,6 +1192,16 @@ class AppStore {
     this.notify();
   }
 
+  public removeFromSyncQueue(id: string): void {
+    if (!id) return;
+    this.syncQueue = this.syncQueue.filter((q) => q.id !== id);
+    try {
+      localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(this.syncQueue));
+    } catch {}
+    this.saveLocalData(true);
+    this.notify();
+  }
+
   public getSyncQueueDetails(): {
     total: number;
     attendanceCount: number;

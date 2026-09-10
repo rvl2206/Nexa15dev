@@ -21,6 +21,7 @@ import {
   ExternalLink,
   Info,
   Check,
+  Trash2,
 } from 'lucide-react';
 import { store, SyncQueueItem } from '../lib/store';
 import { toast } from '../lib/toast';
@@ -70,7 +71,7 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
   useEffect(() => {
     const handleOnline = () => {
       setIsOnline(true);
-      // Auto sync when coming back online
+      // Auto sync quietly when coming back online
       store.syncAllPendingToDatabase(false).catch(() => {});
     };
     const handleOffline = () => setIsOnline(false);
@@ -84,18 +85,14 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
     window.addEventListener('offline', handleOffline);
     window.addEventListener('open-unsynced-modal', handleOpenModal);
 
+    // Initial background sync check on load
+    if (typeof navigator !== 'undefined' && navigator.onLine) {
+      store.syncAllPendingToDatabase(false).catch(() => {});
+    }
+
     const unsubscribe = store.subscribe(() => {
       const current = store.getSyncQueueDetails();
       setQueueDetails(current);
-
-      // Auto-popup for duty officer if there is unsynced data and hasn't auto-opened yet
-      if (current.total > 0 && !hasAutoOpenedRef.current) {
-        hasAutoOpenedRef.current = true;
-        setIsModalOpen(true);
-        playAlertSound();
-      } else if (current.total === 0) {
-        hasAutoOpenedRef.current = false;
-      }
     });
 
     return () => {
@@ -105,6 +102,20 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
       unsubscribe();
     };
   }, []);
+
+  const handleClearQueue = () => {
+    if (window.confirm('Apakah Anda yakin ingin membersihkan seluruh antrean sinkronisasi lokal ini?')) {
+      store.clearSyncQueue();
+      toast.info('Antrean Dibersihkan', 'Seluruh data antrean lokal telah dihapus.');
+      setIsModalOpen(false);
+    }
+  };
+
+  const handleRemoveSingleItem = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    store.removeFromSyncQueue(id);
+    toast.info('Item Dihapus', 'Item antrean berhasil dihapus.');
+  };
 
   const handleSyncNow = async () => {
     if (isSyncing) return;
@@ -264,7 +275,7 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
                 </div>
 
                 {/* Queue List Preview */}
-                <div className="max-h-48 overflow-y-auto space-y-1.5 p-2 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 mb-5 scrollbar-thin">
+                <div className="max-h-48 overflow-y-auto space-y-1.5 p-2 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 mb-4 scrollbar-thin">
                   {queueDetails.items.map((item, idx) => {
                     const info = getItemLabel(item);
                     const IconComponent = info.icon;
@@ -286,12 +297,34 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
                             </p>
                           </div>
                         </div>
-                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800 flex-shrink-0">
-                          Tertunda
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                            Tertunda
+                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => handleRemoveSingleItem(item.id, e)}
+                            title="Hapus item antrean ini"
+                            className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-md transition-all cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
+                </div>
+
+                {/* Clear queue link */}
+                <div className="flex justify-end mb-4">
+                  <button
+                    type="button"
+                    onClick={handleClearQueue}
+                    className="text-[11px] font-semibold text-rose-600 dark:text-rose-400 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Bersihkan Seluruh Antrean Lokal</span>
+                  </button>
                 </div>
 
                 {/* Action Buttons */}
@@ -314,7 +347,7 @@ export const UnsyncedDataWarning: React.FC<UnsyncedDataWarningProps> = ({
                     onClick={() => setIsModalOpen(false)}
                     className="w-full sm:w-auto px-4 py-3 rounded-2xl text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-all cursor-pointer"
                   >
-                    Tutup Sementara
+                    Tutup
                   </button>
                 </div>
               </div>
