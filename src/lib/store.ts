@@ -3,6 +3,7 @@ import {
   AttendanceRecord,
   AttendanceType,
   AttendanceStatus,
+  AttendanceScanMethod,
   Teacher,
   TeacherAttendanceRecord,
   TeacherAttendanceStatus,
@@ -3242,7 +3243,9 @@ class AppStore {
     rawQR?: string,
     rawCode?: string,
     officerEmail = 'Petugas Piket',
-    forcedType?: AttendanceType | 'Auto'
+    forcedType?: AttendanceType | 'Auto',
+    scanMethodOverride?: AttendanceScanMethod,
+    customNote?: string
   ): {
     success: boolean;
     isDuplicate?: boolean;
@@ -3409,6 +3412,17 @@ class AppStore {
     const cleanTeacherNip = (matchedTeacher.nip || matchedTeacher.id || 'tch').replace(/[^a-zA-Z0-9]/g, '');
     const deterministicTeacherId = `tch-att-${cleanTeacherNip}-${todayStr}-${jenis.toLowerCase()}`;
 
+    const effectiveScanMethod: AttendanceScanMethod = scanMethodOverride || (isRfidScan ? 'RFID' : 'QR');
+    let teacherCatatan = jenis === 'Pulang'
+      ? `Selesai Tugas / Pulang${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`
+      : isLate
+      ? `Terlambat ${lateMinutes} menit${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`
+      : `Tepat Waktu${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`;
+
+    if (customNote) {
+      teacherCatatan = `${teacherCatatan} - ${customNote}`;
+    }
+
     const newRecord: TeacherAttendanceRecord = {
       id: deterministicTeacherId,
       tanggal: todayStr,
@@ -3418,11 +3432,11 @@ class AppStore {
       jabatan: matchedTeacher.jabatan,
       id_qr: matchedTeacher.id_qr || `69933068.${matchedTeacher.nip}`,
       rfid_uid: matchedTeacher.rfid_uid,
-      scan_method: isRfidScan ? 'RFID' : 'QR',
+      scan_method: effectiveScanMethod,
       jenis,
       status,
       petugas: formatPetugasRole(officerEmail),
-      catatan: jenis === 'Pulang' ? `Selesai Tugas / Pulang${isRfidScan ? ' (Tap RFID)' : ''}` : isLate ? `Terlambat ${lateMinutes} menit${isRfidScan ? ' (Tap RFID)' : ''}` : `Tepat Waktu${isRfidScan ? ' (Tap RFID)' : ''}`,
+      catatan: teacherCatatan,
       terlambatMenit: lateMinutes,
     };
 
@@ -3660,7 +3674,10 @@ class AppStore {
     return formatter.format(today);
   }
 
-  public isRecordForDate(r: AttendanceRecord, targetYyyyMmDd: string): boolean {
+  public isRecordForDate(
+    r: AttendanceRecord | TeacherAttendanceRecord | { tanggal?: string; timestamp?: string },
+    targetYyyyMmDd: string
+  ): boolean {
     if (!r || !targetYyyyMmDd) return false;
     const targetNorm = this.normalizeToYyyyMmDd(targetYyyyMmDd);
 
@@ -3678,7 +3695,9 @@ class AppStore {
     return false;
   }
 
-  public isRecordForToday(r: AttendanceRecord): boolean {
+  public isRecordForToday(
+    r: AttendanceRecord | TeacherAttendanceRecord | { tanggal?: string; timestamp?: string }
+  ): boolean {
     return this.isRecordForDate(r, this.getTodayYyyyMmDd());
   }
 
@@ -3687,7 +3706,9 @@ class AppStore {
     rawQR?: string,
     rawCode?: string,
     officerEmail = 'Petugas Piket',
-    forcedType?: AttendanceType | 'Auto'
+    forcedType?: AttendanceType | 'Auto',
+    scanMethodOverride?: AttendanceScanMethod,
+    customNote?: string
   ): {
     success: boolean;
     isDuplicate?: boolean;
@@ -3878,6 +3899,17 @@ class AppStore {
     const cleanStudentNisn = (matchedStudent.nisn || matchedStudent.id || 'std').replace(/[^a-zA-Z0-9]/g, '');
     const deterministicStudentId = `att-${cleanStudentNisn}-${todayStr}-${jenis.toLowerCase()}`;
 
+    const effectiveScanMethod: AttendanceScanMethod = scanMethodOverride || (isRfidScan ? 'RFID' : 'QR');
+    let studentCatatan = jenis === 'Pulang'
+      ? `Selesai KBM / Pulang${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`
+      : isLate
+      ? `Terlambat ${lateMinutes} menit${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`
+      : `Tepat Waktu${isRfidScan ? ' (Tap RFID)' : effectiveScanMethod === 'Manual' ? ' (Manual/Lupa Kartu)' : ''}`;
+
+    if (customNote) {
+      studentCatatan = `${studentCatatan} - ${customNote}`;
+    }
+
     const newRecord: AttendanceRecord = {
       id: deterministicStudentId,
       tanggal: todayStr,
@@ -3887,11 +3919,11 @@ class AppStore {
       kelas: matchedStudent.kelas,
       id_qr: matchedStudent.id_qr || `69933068.${matchedStudent.nisn}.${matchedStudent.nama}`,
       rfid_uid: matchedStudent.rfid_uid,
-      scan_method: isRfidScan ? 'RFID' : 'QR',
+      scan_method: effectiveScanMethod,
       jenis,
       status,
       petugas: formatPetugasRole(officerEmail),
-      catatan: jenis === 'Pulang' ? `Selesai KBM / Pulang${isRfidScan ? ' (Tap RFID)' : ''}` : isLate ? `Terlambat ${lateMinutes} menit${isRfidScan ? ' (Tap RFID)' : ''}` : `Tepat Waktu${isRfidScan ? ' (Tap RFID)' : ''}`,
+      catatan: studentCatatan,
       terlambatMenit: lateMinutes,
     };
 

@@ -7,6 +7,7 @@ import {
   AttendanceRecord,
   AttendanceStatus,
   AttendanceType,
+  AttendanceScanMethod,
   Teacher,
   TeacherAttendanceRecord,
   TeacherAttendanceStatus,
@@ -58,6 +59,11 @@ import {
   Focus,
   Crosshair,
   ExternalLink,
+  Search,
+  Users,
+  Filter,
+  CheckSquare,
+  ArrowRight,
 } from 'lucide-react';
 import { toast } from '../lib/toast';
 
@@ -72,7 +78,8 @@ interface ScanOutcome {
   isDuplicate?: boolean;
   isOffline?: boolean;
   targetMode?: ScanTargetMode;
-  scanMethod?: 'QR' | 'RFID';
+  scanMethod?: AttendanceScanMethod;
+  isForgotCard?: boolean;
   student?: Student;
   teacher?: Teacher;
   record?: AttendanceRecord;
@@ -139,9 +146,23 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const [lastScannedQR, setLastScannedQR] = useState<string>('');
   const [studentsList, setStudentsList] = useState<Student[]>([]);
   const [teachersList, setTeachersList] = useState<Teacher[]>([]);
+  const [attendanceList, setAttendanceList] = useState<AttendanceRecord[]>(store.getAttendance());
+  const [teacherAttendanceList, setTeacherAttendanceList] = useState<TeacherAttendanceRecord[]>(store.getTeacherAttendance());
   const [selectedStudentForQR, setSelectedStudentForQR] = useState<string>('');
   const [selectedTeacherForQR, setSelectedTeacherForQR] = useState<string>('');
   const [manualInput, setManualInput] = useState('');
+
+  // Autocomplete & Forgot ID Card Feature States
+  const [showSuggestions, setShowSuggestions] = useState<boolean>(false);
+  const [focusedSuggestionIndex, setFocusedSuggestionIndex] = useState<number>(-1);
+  const [markAsForgotCard, setMarkAsForgotCard] = useState<boolean>(true);
+  const [showForgotCardModal, setShowForgotCardModal] = useState<boolean>(false);
+  const [forgotCardClassFilter, setForgotCardClassFilter] = useState<string>('Semua');
+  const [forgotCardStatusFilter, setForgotCardStatusFilter] = useState<'belum' | 'semua'>('belum');
+  const [forgotCardSearch, setForgotCardSearch] = useState<string>('');
+
+  const suggestionBoxRef = useRef<HTMLDivElement | null>(null);
+  const manualInputRef = useRef<HTMLInputElement | null>(null);
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const isProcessingRef = useRef<boolean>(false);
@@ -197,6 +218,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   useEffect(() => {
     setStudentsList(store.getStudents());
     setTeachersList(store.getTeachers());
+    setAttendanceList(store.getAttendance());
+    setTeacherAttendanceList(store.getTeacherAttendance());
     store.fetchFromServer();
 
     const handleOnline = () => {
@@ -220,6 +243,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     const unsubscribe = store.subscribe(() => {
       setStudentsList(store.getStudents());
       setTeachersList(store.getTeachers());
+      setAttendanceList(store.getAttendance());
+      setTeacherAttendanceList(store.getTeacherAttendance());
       setOfflineQueueCount(store.getOfflineQueueCount());
     });
 
@@ -239,6 +264,22 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       unsubscribe();
       stopCamera();
     };
+  }, []);
+
+  // Close autocomplete suggestions when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        suggestionBoxRef.current &&
+        !suggestionBoxRef.current.contains(e.target as Node) &&
+        manualInputRef.current &&
+        !manualInputRef.current.contains(e.target as Node)
+      ) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
   const toggleWebNfc = async () => {
@@ -520,17 +561,207 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     }
   };
 
-  const processScannedCode = (decodedText: string) => {
+  // Helper for highlighting matching letters in search results
+  const highlightMatch = (text: string, query: string) => {
+    if (!query || !query.trim()) return text;
+    const q = query.trim().toLowerCase();
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx === -1) return text;
+    const before = text.slice(0, idx);
+    const match = text.slice(idx, idx + q.length);
+    const after = text.slice(idx + q.length);
+    return (
+      <span>
+        {before}
+        <span className="bg-yellow-200 dark:bg-yellow-900/60 text-slate-900 dark:text-yellow-200 font-extrabold underline rounded px-0.5">
+          {match}
+        </span>
+        {after}
+      </span>
+    );
+  };
+
+  // Distinct classes list for filter
+  const availableClasses = React.useMemo(() => {
+    const set = new Set<string>();
+    studentsList.forEach((s) => {
+      if (s.kelas && s.kelas.trim()) set.add(s.kelas.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [studentsList]);
+
+  // Realtime attendance status resolver for students
+  const getStudentAttendanceStatusToday = (student: Student) => {
+    const today = store.getTodayYyyyMmDd();
+    const studentRecords = attendanceList.filter(
+      (a) =>
+        store.isRecordForDate(a, today) &&
+        (a.nisn === student.nisn || (a.nama === student.nama && a.kelas === student.kelas)) &&
+        !(a.id?.startsWith('att-autoalpa-') || a.catatan?.includes('Alpa Otomatis'))
+    );
+    const masuk = studentRecords.find((a) => a.jenis === 'Masuk');
+    const pulang = studentRecords.find((a) => a.jenis === 'Pulang');
+
+    if (masuk && pulang) {
+      return {
+        status: 'Lengkap',
+        badgeText: `Lengkap (${store.formatRecordTimeWIT(pulang.timestamp)})`,
+        isComplete: true,
+        canScanMasuk: false,
+        canScanPulang: false,
+        color: 'bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200 border-blue-300 dark:border-blue-700',
+      };
+    }
+    if (masuk) {
+      return {
+        status: masuk.status,
+        badgeText: `Hadir (${store.formatRecordTimeWIT(masuk.timestamp)})`,
+        isComplete: false,
+        canScanMasuk: false,
+        canScanPulang: true,
+        color:
+          masuk.status === 'Terlambat'
+            ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+            : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700',
+      };
+    }
+    return {
+      status: 'Belum',
+      badgeText: 'Belum Presensi',
+      isComplete: false,
+      canScanMasuk: true,
+      canScanPulang: false,
+      color: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border-slate-200 dark:border-slate-700',
+    };
+  };
+
+  // Realtime attendance status resolver for teachers
+  const getTeacherAttendanceStatusToday = (teacher: Teacher) => {
+    const today = store.getTodayYyyyMmDd();
+    const teacherRecords = teacherAttendanceList.filter(
+      (a) =>
+        store.isRecordForDate(a, today) &&
+        (a.nip === teacher.nip || a.nama === teacher.nama)
+    );
+    const masuk = teacherRecords.find((a) => a.jenis === 'Masuk');
+    const pulang = teacherRecords.find((a) => a.jenis === 'Pulang');
+
+    if (masuk && pulang) {
+      return {
+        status: 'Lengkap',
+        badgeText: `Lengkap (${store.formatRecordTimeWIT(pulang.timestamp)})`,
+        isComplete: true,
+        canScanMasuk: false,
+        canScanPulang: false,
+        color: 'bg-blue-100 text-blue-800 dark:bg-blue-900/60 dark:text-blue-200 border-blue-300 dark:border-blue-700',
+      };
+    }
+    if (masuk) {
+      return {
+        status: masuk.status,
+        badgeText: `Hadir (${store.formatRecordTimeWIT(masuk.timestamp)})`,
+        isComplete: false,
+        canScanMasuk: false,
+        canScanPulang: true,
+        color:
+          masuk.status === 'Terlambat'
+            ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+            : 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700',
+      };
+    }
+    return {
+      status: 'Belum',
+      badgeText: 'Belum Presensi',
+      isComplete: false,
+      canScanMasuk: true,
+      canScanPulang: false,
+      color: 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border-slate-200 dark:border-slate-700',
+    };
+  };
+
+  // Autocomplete candidate suggestions based on manual input
+  const suggestions = React.useMemo(() => {
+    const query = manualInput.trim().toLowerCase();
+    if (!query) return [];
+
+    if (scanTargetMode === 'guru') {
+      return teachersList
+        .filter((t) => t.status !== 'nonaktif')
+        .filter((t) => {
+          const nameMatch = t.nama.toLowerCase().includes(query);
+          const nipMatch = t.nip?.toLowerCase().includes(query);
+          const jabMatch = t.jabatan?.toLowerCase().includes(query);
+          return nameMatch || nipMatch || jabMatch;
+        })
+        .slice(0, 7);
+    } else {
+      return studentsList
+        .filter((s) => s.status === 'aktif')
+        .filter((s) => {
+          const nameMatch = s.nama.toLowerCase().includes(query);
+          const nisnMatch = s.nisn?.toLowerCase().includes(query);
+          const classMatch = s.kelas?.toLowerCase().includes(query);
+          return nameMatch || nisnMatch || classMatch;
+        })
+        .slice(0, 7);
+    }
+  }, [manualInput, scanTargetMode, studentsList, teachersList]);
+
+  // Filtered students for the dedicated "Lupa ID Card" search modal
+  const filteredForgotCardStudents = React.useMemo(() => {
+    let list = studentsList.filter((s) => s.status === 'aktif');
+
+    if (forgotCardClassFilter !== 'Semua') {
+      list = list.filter((s) => s.kelas === forgotCardClassFilter);
+    }
+
+    if (forgotCardSearch.trim()) {
+      const q = forgotCardSearch.trim().toLowerCase();
+      list = list.filter(
+        (s) =>
+          s.nama.toLowerCase().includes(q) ||
+          s.nisn?.toLowerCase().includes(q) ||
+          s.kelas?.toLowerCase().includes(q)
+      );
+    }
+
+    if (forgotCardStatusFilter === 'belum') {
+      const today = store.getTodayYyyyMmDd();
+      list = list.filter((student) => {
+        const hasAtt = attendanceList.some(
+          (a) =>
+            store.isRecordForDate(a, today) &&
+            (a.nisn === student.nisn || (a.nama === student.nama && a.kelas === student.kelas)) &&
+            !(a.id?.startsWith('att-autoalpa-') || a.catatan?.includes('Alpa Otomatis'))
+        );
+        return !hasAtt;
+      });
+    }
+
+    return list;
+  }, [studentsList, forgotCardClassFilter, forgotCardSearch, forgotCardStatusFilter, attendanceList]);
+
+  const processScannedCode = (
+    decodedText: string,
+    options?: {
+      scanMethod?: AttendanceScanMethod;
+      customNote?: string;
+      isManualForgotCard?: boolean;
+      forcedType?: AttendanceType;
+    }
+  ) => {
     if (!decodedText || !decodedText.trim()) return;
 
     const raw = decodedText.trim();
     const now = Date.now();
 
-    // 1. Same-QR debounce check
-    const lastTime = recentScanTimesRef.current.get(raw);
-    if (lastTime && now - lastTime < debounceSeconds * 1000) {
-      toast.warning('Terlalu Cepat!', 'Data ini baru saja dipindai beberapa detik yang lalu. Mohon tunggu sesaat.');
-      return;
+    // 1. Same-QR debounce check (skip debounce if manual from autocomplete / modal)
+    if (!options?.isManualForgotCard) {
+      const lastTime = recentScanTimesRef.current.get(raw);
+      if (lastTime && now - lastTime < debounceSeconds * 1000) {
+        toast.warning('Terlalu Cepat!', 'Data ini baru saja dipindai beberapa detik yang lalu. Mohon tunggu sesaat.');
+        return;
+      }
     }
 
     // Keep map bounded to prevent memory growth
@@ -596,9 +827,19 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       }
     }
 
+    const effectiveScanType = options?.forcedType || scanTypeMode;
+
     if (effectiveTarget === 'guru') {
       // Record scan in teacher attendance store with scan type mode
-      const result = store.recordTeacherScan(raw, raw, raw, currentOfficer, scanTypeMode);
+      const result = store.recordTeacherScan(
+        raw,
+        raw,
+        raw,
+        currentOfficer,
+        effectiveScanType,
+        options?.scanMethod,
+        options?.customNote
+      );
 
       if (result.success) {
         playSuccessSound();
@@ -609,13 +850,16 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       }
 
       const isRfid = result.record?.scan_method === 'RFID' || (result.teacher?.rfid_uid && raw.toUpperCase().includes(result.teacher.rfid_uid.toUpperCase()));
+      const isManual = options?.scanMethod === 'Manual' || result.record?.scan_method === 'Manual';
+      const scanMethodFinal: AttendanceScanMethod = isManual ? 'Manual' : isRfid ? 'RFID' : 'QR';
 
       const outcome: ScanOutcome = {
         success: result.success,
         isDuplicate: result.isDuplicate,
         isOffline: currentlyOffline,
         targetMode: 'guru',
-        scanMethod: isRfid ? 'RFID' : 'QR',
+        scanMethod: scanMethodFinal,
+        isForgotCard: options?.isManualForgotCard || result.record?.catatan?.includes('Lupa'),
         teacher: result.teacher,
         teacherRecord: result.record,
         type: result.type,
@@ -633,7 +877,15 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       }
     } else {
       // Record scan in student attendance store with scan type mode
-      const result = store.recordScan(raw, raw, raw, currentOfficer, scanTypeMode);
+      const result = store.recordScan(
+        raw,
+        raw,
+        raw,
+        currentOfficer,
+        effectiveScanType,
+        options?.scanMethod,
+        options?.customNote
+      );
 
       if (result.success) {
         playSuccessSound();
@@ -644,13 +896,16 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       }
 
       const isRfid = result.record?.scan_method === 'RFID' || (result.student?.rfid_uid && raw.toUpperCase().includes(result.student.rfid_uid.toUpperCase()));
+      const isManual = options?.scanMethod === 'Manual' || result.record?.scan_method === 'Manual';
+      const scanMethodFinal: AttendanceScanMethod = isManual ? 'Manual' : isRfid ? 'RFID' : 'QR';
 
       const outcome: ScanOutcome = {
         success: result.success,
         isDuplicate: result.isDuplicate,
         isOffline: currentlyOffline,
         targetMode: 'siswa',
-        scanMethod: isRfid ? 'RFID' : 'QR',
+        scanMethod: scanMethodFinal,
+        isForgotCard: options?.isManualForgotCard || result.record?.catatan?.includes('Lupa'),
         student: result.student,
         record: result.record,
         type: result.type,
@@ -672,6 +927,50 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     setTimeout(() => {
       isProcessingRef.current = false;
     }, 250);
+  };
+
+  const handleSelectStudentForManualAttendance = (
+    student: Student,
+    customForcedType?: AttendanceType
+  ) => {
+    setShowSuggestions(false);
+    setManualInput('');
+    setFocusedSuggestionIndex(-1);
+
+    const identifier = student.nisn || student.nama;
+    processScannedCode(identifier, {
+      scanMethod: markAsForgotCard ? 'Manual' : undefined,
+      isManualForgotCard: markAsForgotCard,
+      customNote: markAsForgotCard ? 'Presensi Manual (Lupa Bawa ID Card)' : undefined,
+      forcedType: customForcedType,
+    });
+
+    toast.success(
+      'Presensi Manual Diproses',
+      `${student.nama} (${student.kelas}) berhasil diproses secara manual.${markAsForgotCard ? ' Dicatat keterangan lupa kartu.' : ''}`
+    );
+  };
+
+  const handleSelectTeacherForManualAttendance = (
+    teacher: Teacher,
+    customForcedType?: AttendanceType
+  ) => {
+    setShowSuggestions(false);
+    setManualInput('');
+    setFocusedSuggestionIndex(-1);
+
+    const identifier = teacher.nip || teacher.nama;
+    processScannedCode(identifier, {
+      scanMethod: markAsForgotCard ? 'Manual' : undefined,
+      isManualForgotCard: markAsForgotCard,
+      customNote: markAsForgotCard ? 'Presensi Manual Guru (Lupa Bawa ID Card)' : undefined,
+      forcedType: customForcedType,
+    });
+
+    toast.success(
+      'Presensi Manual Guru Diproses',
+      `${teacher.nama} berhasil diproses secara manual.`
+    );
   };
 
   const handleAssignRfidToStudent = (rfidUid: string, studentId: string) => {
@@ -1890,37 +2189,325 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
               </div>
             </div>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (manualInput.trim()) {
-                  processScannedCode(manualInput.trim());
-                  setManualInput('');
-                }
-              }}
-              className="flex gap-2"
-            >
-              <div className="relative flex-1">
-                <input
-                  type="text"
-                  value={manualInput}
-                  onChange={(e) => setManualInput(e.target.value)}
-                  placeholder={
-                    scanTargetMode === 'guru'
-                      ? 'Tempelkan Kartu RFID / Ketik NIP / Nama Guru lalu Enter...'
-                      : 'Tempelkan Kartu RFID / Ketik NISN / Nama Siswa lalu Enter...'
-                  }
-                  className="w-full pl-8 pr-3 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-white rounded-xl focus:ring-2 focus:ring-blue-600"
-                />
-                <CreditCard className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+            {/* Hardware Scanner, USB RFID Reader & Autocomplete Presensi Manual */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wider flex-wrap gap-2">
+                <span className="flex items-center gap-1.5">
+                  <Radio className="w-3.5 h-3.5 text-indigo-500 animate-pulse" />
+                  <span>Reader RFID USB, Web NFC & Presensi Manual Siswa</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex items-center gap-1 text-[10px] text-emerald-600 dark:text-emerald-400 font-bold bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800">
+                    <CreditCard className="w-3 h-3" />
+                    <span>USB RFID Plug & Play Aktif</span>
+                  </span>
+                  {hasNfcSupport && (
+                    <button
+                      type="button"
+                      onClick={toggleWebNfc}
+                      className={`inline-flex items-center gap-1 text-[10px] font-extrabold px-2.5 py-0.5 rounded-md border transition-all cursor-pointer ${
+                        isNfcActive
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm animate-pulse'
+                          : 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border-indigo-300 dark:border-indigo-800 hover:bg-indigo-100'
+                      }`}
+                      title="Aktifkan sensor Web NFC perangkat (misal: HP Android)"
+                    >
+                      <Radio className="w-3 h-3" />
+                      <span>{isNfcActive ? 'NFC Sensor Aktif' : 'NFC HP Siaga'}</span>
+                    </button>
+                  )}
+                </div>
               </div>
-              <button
-                type="submit"
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5"
-              >
-                <span>Proses Scan</span>
-              </button>
-            </form>
+
+              {/* Main Input with Autocomplete Dropdown & Quick Dialog */}
+              <div className="relative">
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (focusedSuggestionIndex >= 0 && suggestions[focusedSuggestionIndex]) {
+                      const selected = suggestions[focusedSuggestionIndex];
+                      if ('nip' in selected) {
+                        handleSelectTeacherForManualAttendance(selected as Teacher);
+                      } else {
+                        handleSelectStudentForManualAttendance(selected as Student);
+                      }
+                      return;
+                    }
+
+                    if (manualInput.trim()) {
+                      processScannedCode(manualInput.trim(), {
+                        scanMethod: markAsForgotCard ? 'Manual' : undefined,
+                        isManualForgotCard: markAsForgotCard,
+                        customNote: markAsForgotCard ? 'Presensi Manual (Lupa Bawa ID Card)' : undefined,
+                      });
+                      setManualInput('');
+                      setShowSuggestions(false);
+                    }
+                  }}
+                  className="flex gap-2 items-center"
+                >
+                  <div className="relative flex-1">
+                    <input
+                      ref={manualInputRef}
+                      type="text"
+                      value={manualInput}
+                      onFocus={() => {
+                        if (manualInput.trim().length > 0) setShowSuggestions(true);
+                      }}
+                      onChange={(e) => {
+                        setManualInput(e.target.value);
+                        setShowSuggestions(true);
+                        setFocusedSuggestionIndex(-1);
+                      }}
+                      onKeyDown={(e) => {
+                        if (showSuggestions && suggestions.length > 0) {
+                          if (e.key === 'ArrowDown') {
+                            e.preventDefault();
+                            setFocusedSuggestionIndex((prev) =>
+                              prev < suggestions.length - 1 ? prev + 1 : 0
+                            );
+                            return;
+                          }
+                          if (e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            setFocusedSuggestionIndex((prev) =>
+                              prev > 0 ? prev - 1 : suggestions.length - 1
+                            );
+                            return;
+                          }
+                          if (e.key === 'Escape') {
+                            setShowSuggestions(false);
+                            return;
+                          }
+                        }
+                      }}
+                      placeholder={
+                        scanTargetMode === 'guru'
+                          ? 'Tempelkan Kartu RFID / Ketik Nama Guru atau NIP...'
+                          : 'Tempelkan Kartu RFID / Ketik Nama Siswa, NISN, atau Kelas...'
+                      }
+                      className="w-full pl-9 pr-9 py-2.5 text-xs font-medium border border-slate-300 dark:border-slate-700 dark:bg-slate-800 dark:text-white rounded-xl focus:ring-2 focus:ring-blue-600 focus:border-blue-600 shadow-xs transition-all"
+                    />
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    {manualInput && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setManualInput('');
+                          setShowSuggestions(false);
+                          manualInputRef.current?.focus();
+                        }}
+                        className="absolute right-3 top-2.5 p-0.5 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                        title="Hapus pencarian"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0"
+                    title="Proses langsung kode / nama yang diketik"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Proses</span>
+                  </button>
+
+                  {/* Button to open dedicated Forgotten Card Dialog */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowForgotCardModal(true);
+                      setForgotCardSearch('');
+                    }}
+                    className="px-3.5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-extrabold text-xs rounded-xl shadow transition-all whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0"
+                    title="Cari dan pilih siswa yang lupa membawa ID Card dengan filter kelas"
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Daftar Lupa Kartu</span>
+                    <span className="sm:hidden">Lupa Kartu</span>
+                  </button>
+                </form>
+
+                {/* Floating Autocomplete Suggestions Panel */}
+                {showSuggestions && manualInput.trim().length > 0 && (
+                  <div
+                    ref={suggestionBoxRef}
+                    className="absolute left-0 right-0 top-full mt-1 z-50 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xl overflow-hidden divide-y divide-slate-100 dark:divide-slate-800 animate-in fade-in slide-in-from-top-2 duration-150"
+                  >
+                    <div className="px-3 py-1.5 bg-slate-50 dark:bg-slate-800/80 flex items-center justify-between text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                      <span>
+                        Pilihan Hasil Pencarian ({suggestions.length} Ditemukan)
+                      </span>
+                      <span className="text-[9px] lowercase font-normal">
+                        Gunakan ↑↓ panah & tekan Enter
+                      </span>
+                    </div>
+
+                    {suggestions.length === 0 ? (
+                      <div className="p-4 text-center text-xs text-slate-500 dark:text-slate-400 space-y-1">
+                        <p className="font-semibold text-slate-700 dark:text-slate-300">
+                          Tidak ada {scanTargetMode === 'guru' ? 'guru' : 'siswa'} yang cocok dengan "{manualInput}".
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          Pastikan ejaan nama atau nomor NISN/NIP sudah benar, atau buka menu "Daftar Lupa Kartu".
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800/60">
+                        {suggestions.map((item, idx) => {
+                          const isStudent = 'kelas' in item;
+                          const student = isStudent ? (item as Student) : null;
+                          const teacher = !isStudent ? (item as Teacher) : null;
+                          const isFocused = idx === focusedSuggestionIndex;
+
+                          const statusInfo = isStudent
+                            ? getStudentAttendanceStatusToday(student!)
+                            : getTeacherAttendanceStatusToday(teacher!);
+
+                          return (
+                            <div
+                              key={item.id}
+                              onMouseEnter={() => setFocusedSuggestionIndex(idx)}
+                              className={`p-2.5 transition-colors flex items-center justify-between gap-3 cursor-pointer ${
+                                isFocused
+                                  ? 'bg-blue-50 dark:bg-blue-950/50'
+                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                              }`}
+                            >
+                              <div
+                                onClick={() => {
+                                  if (isStudent) {
+                                    handleSelectStudentForManualAttendance(student!);
+                                  } else {
+                                    handleSelectTeacherForManualAttendance(teacher!);
+                                  }
+                                }}
+                                className="flex items-center gap-2.5 flex-1 min-w-0"
+                              >
+                                <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 flex items-center justify-center font-bold text-xs shrink-0 border border-blue-200 dark:border-blue-800">
+                                  {item.nama.charAt(0).toUpperCase()}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-extrabold text-xs text-slate-900 dark:text-white truncate">
+                                      {highlightMatch(item.nama, manualInput)}
+                                    </span>
+                                    {isStudent && (
+                                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 shrink-0">
+                                        {highlightMatch(student!.kelas, manualInput)}
+                                      </span>
+                                    )}
+                                    {!isStudent && (
+                                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 shrink-0">
+                                        {teacher!.jabatan}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 text-[10px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                    <span>
+                                      {isStudent ? 'NISN: ' : 'NIP: '}
+                                      <span className="font-mono">
+                                        {highlightMatch(
+                                          (isStudent ? student!.nisn : teacher!.nip) || '-',
+                                          manualInput
+                                        )}
+                                      </span>
+                                    </span>
+                                    <span>•</span>
+                                    <span
+                                      className={`px-1.5 py-0.2 rounded-full font-bold border text-[9px] ${statusInfo.color}`}
+                                    >
+                                      {statusInfo.badgeText}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Action Buttons for this item */}
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                {scanTypeMode === 'Auto' ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isStudent) {
+                                          handleSelectStudentForManualAttendance(student!, 'Masuk');
+                                        } else {
+                                          handleSelectTeacherForManualAttendance(teacher!, 'Masuk');
+                                        }
+                                      }}
+                                      className="px-2 py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                                      title="Presensi Manual Masuk"
+                                    >
+                                      <LogIn className="w-3 h-3" />
+                                      <span>Masuk</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (isStudent) {
+                                          handleSelectStudentForManualAttendance(student!, 'Pulang');
+                                        } else {
+                                          handleSelectTeacherForManualAttendance(teacher!, 'Pulang');
+                                        }
+                                      }}
+                                      className="px-2 py-1 text-[10px] font-bold bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                                      title="Presensi Manual Pulang"
+                                    >
+                                      <LogOut className="w-3 h-3" />
+                                      <span>Pulang</span>
+                                    </button>
+                                  </>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (isStudent) {
+                                        handleSelectStudentForManualAttendance(student!);
+                                      } else {
+                                        handleSelectTeacherForManualAttendance(teacher!);
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 text-[10px] font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all cursor-pointer flex items-center gap-1 shadow-xs"
+                                    title={`Presensi Manual (${scanTypeMode.toUpperCase()})`}
+                                  >
+                                    <span>Pilih ({scanTypeMode})</span>
+                                    <ArrowRight className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Option Checkbox for Forgotten Card */}
+              <div className="flex items-center justify-between pt-1 text-[11px] text-slate-500 dark:text-slate-400">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={markAsForgotCard}
+                    onChange={(e) => setMarkAsForgotCard(e.target.checked)}
+                    className="w-3.5 h-3.5 text-blue-600 rounded border-slate-300 dark:border-slate-600 focus:ring-blue-500"
+                  />
+                  <span>
+                    Beri tanda otomatis sebagai <span className="font-bold text-amber-700 dark:text-amber-300">"Presensi Manual (Lupa Bawa ID Card)"</span>
+                  </span>
+                </label>
+                <span className="text-[10px] text-slate-400">
+                  Total Siswa: {studentsList.length}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -2030,12 +2617,19 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                             )}
                             <span
                               className={`font-extrabold text-[9px] px-2 py-0.5 rounded-full inline-flex items-center gap-0.5 border ${
-                                scanResult.scanMethod === 'RFID'
+                                scanResult.scanMethod === 'Manual'
+                                  ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                                  : scanResult.scanMethod === 'RFID'
                                   ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
                                   : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                               }`}
                             >
-                              {scanResult.scanMethod === 'RFID' ? (
+                              {scanResult.scanMethod === 'Manual' ? (
+                                <>
+                                  <UserCheck className="w-2.5 h-2.5" />
+                                  <span>MANUAL (LUPA KARTU)</span>
+                                </>
+                              ) : scanResult.scanMethod === 'RFID' ? (
                                 <>
                                   <CreditCard className="w-2.5 h-2.5" />
                                   <span>RFID Card</span>
@@ -2111,12 +2705,19 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                             )}
                             <span
                               className={`font-extrabold text-[9px] px-2 py-0.5 rounded-full inline-flex items-center gap-0.5 border ${
-                                scanResult.scanMethod === 'RFID'
+                                scanResult.scanMethod === 'Manual'
+                                  ? 'bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                                  : scanResult.scanMethod === 'RFID'
                                   ? 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950 dark:text-indigo-300 border-indigo-200 dark:border-indigo-800'
                                   : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                               }`}
                             >
-                              {scanResult.scanMethod === 'RFID' ? (
+                              {scanResult.scanMethod === 'Manual' ? (
+                                <>
+                                  <UserCheck className="w-2.5 h-2.5" />
+                                  <span>MANUAL (LUPA KARTU)</span>
+                                </>
+                              ) : scanResult.scanMethod === 'RFID' ? (
                                 <>
                                   <CreditCard className="w-2.5 h-2.5" />
                                   <span>RFID Card</span>
@@ -2129,6 +2730,15 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                               )}
                             </span>
                           </div>
+                        </div>
+                      )}
+
+                      {scanResult.record?.catatan && (
+                        <div className="flex justify-between items-center py-0.5 text-xs">
+                          <span className="text-slate-500 dark:text-slate-400">Keterangan:</span>
+                          <span className="font-semibold text-amber-700 dark:text-amber-300 italic">
+                            {scanResult.record.catatan}
+                          </span>
                         </div>
                       )}
 
@@ -2580,6 +3190,244 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                 }`}
               >
                 <span>Tutup & Lanjutkan Scan ({countdown}s)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Dialog: Quick Search & Manual Attendance for Students without ID Card */}
+      {showForgotCardModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-2xl rounded-3xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col max-h-[90vh]">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-gradient-to-r from-amber-500 to-amber-600 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center shrink-0">
+                  <Users className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold leading-tight">
+                    Presensi Manual Siswa (Lupa ID Card)
+                  </h3>
+                  <p className="text-xs text-amber-100 font-medium">
+                    Pilih siswa langsung untuk mencatat kehadiran tanpa kartu fisik QR/RFID.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowForgotCardModal(false)}
+                className="w-8 h-8 rounded-full bg-white/20 hover:bg-white/30 text-white flex items-center justify-center transition-all cursor-pointer"
+                title="Tutup jendela"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Filter Controls Bar */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-800 space-y-3 shrink-0">
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                {/* Search query */}
+                <div className="sm:col-span-7 relative">
+                  <input
+                    type="text"
+                    value={forgotCardSearch}
+                    onChange={(e) => setForgotCardSearch(e.target.value)}
+                    placeholder="Ketik nama siswa atau NISN..."
+                    className="w-full pl-9 pr-8 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-amber-500"
+                    autoFocus
+                  />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  {forgotCardSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setForgotCardSearch('')}
+                      className="absolute right-2.5 top-2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filter Kelas */}
+                <div className="sm:col-span-5 relative">
+                  <select
+                    value={forgotCardClassFilter}
+                    onChange={(e) => setForgotCardClassFilter(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-bold border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                  >
+                    <option value="Semua">Semua Kelas ({studentsList.length})</option>
+                    {availableClasses.map((cls) => {
+                      const count = studentsList.filter((s) => s.kelas === cls).length;
+                      return (
+                        <option key={cls} value={cls}>
+                          Kelas {cls} ({count} siswa)
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+              </div>
+
+              {/* Status Filter Tabs */}
+              <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+                <div className="flex items-center gap-1.5 p-1 bg-slate-200/80 dark:bg-slate-800 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setForgotCardStatusFilter('belum')}
+                    className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                      forgotCardStatusFilter === 'belum'
+                        ? 'bg-white dark:bg-slate-700 text-amber-700 dark:text-amber-300 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    Belum Presensi Saja
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setForgotCardStatusFilter('semua')}
+                    className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                      forgotCardStatusFilter === 'semua'
+                        ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-white shadow-xs'
+                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                    }`}
+                  >
+                    Semua Siswa
+                  </button>
+                </div>
+
+                <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                  Menampilkan <span className="font-bold text-slate-800 dark:text-slate-200">{filteredForgotCardStudents.length}</span> siswa
+                </div>
+              </div>
+            </div>
+
+            {/* Students List Table / Cards */}
+            <div className="p-4 overflow-y-auto flex-1 divide-y divide-slate-100 dark:divide-slate-800/60">
+              {filteredForgotCardStudents.length === 0 ? (
+                <div className="py-12 text-center text-slate-500 dark:text-slate-400 space-y-2">
+                  <UserCheck className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600" />
+                  <p className="font-bold text-sm text-slate-700 dark:text-slate-300">
+                    Tidak ada siswa yang sesuai kriteria filter
+                  </p>
+                  <p className="text-xs text-slate-400 max-w-sm mx-auto">
+                    {forgotCardStatusFilter === 'belum'
+                      ? 'Semua siswa di kelas ini mungkin sudah melakukan presensi hari ini, atau periksa kembali kata kunci pencarian.'
+                      : 'Periksa kembali kata kunci pencarian nama atau filter kelas.'}
+                  </p>
+                  {forgotCardStatusFilter === 'belum' && (
+                    <button
+                      type="button"
+                      onClick={() => setForgotCardStatusFilter('semua')}
+                      className="mt-2 text-xs font-bold text-amber-600 hover:text-amber-700 dark:text-amber-400 underline cursor-pointer"
+                    >
+                      Tampilkan Semua Siswa Kelas Ini
+                    </button>
+                  )}
+                </div>
+              ) : (
+                filteredForgotCardStudents.map((student) => {
+                  const statusInfo = getStudentAttendanceStatusToday(student);
+
+                  return (
+                    <div
+                      key={student.id}
+                      className="py-3 px-2 flex items-center justify-between gap-3 hover:bg-slate-50 dark:hover:bg-slate-800/40 rounded-xl transition-all"
+                    >
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-amber-100 to-amber-200 dark:from-amber-950 dark:to-amber-900 text-amber-800 dark:text-amber-200 font-black text-sm flex items-center justify-center shrink-0 border border-amber-300/60 dark:border-amber-700">
+                          {student.nama.charAt(0).toUpperCase()}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-extrabold text-sm text-slate-900 dark:text-white truncate">
+                              {highlightMatch(student.nama, forgotCardSearch)}
+                            </span>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 shrink-0">
+                              {student.kelas}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                            <span>
+                              NISN: <span className="font-mono font-medium">{highlightMatch(student.nisn, forgotCardSearch)}</span>
+                            </span>
+                            <span>•</span>
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${statusInfo.color}`}>
+                              {statusInfo.badgeText}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Quick Action Buttons */}
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {statusInfo.canScanMasuk && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handleSelectStudentForManualAttendance(student, 'Masuk');
+                              setShowForgotCardModal(false);
+                            }}
+                            className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+                            title="Presensi Masuk Siswa (Lupa Kartu)"
+                          >
+                            <LogIn className="w-3.5 h-3.5" />
+                            <span>Presensi Masuk</span>
+                          </button>
+                        )}
+
+                        {statusInfo.canScanPulang && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handleSelectStudentForManualAttendance(student, 'Pulang');
+                              setShowForgotCardModal(false);
+                            }}
+                            className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+                            title="Presensi Pulang Siswa (Lupa Kartu)"
+                          >
+                            <LogOut className="w-3.5 h-3.5" />
+                            <span>Presensi Pulang</span>
+                          </button>
+                        )}
+
+                        {statusInfo.isComplete && (
+                          <div className="flex items-center gap-1">
+                            <span className="text-[11px] font-bold text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-950 px-2.5 py-1 rounded-lg border border-blue-200 dark:border-blue-800">
+                              Sudah Lengkap
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectStudentForManualAttendance(student);
+                                setShowForgotCardModal(false);
+                              }}
+                              className="px-2 py-1 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-[10px] font-bold rounded-lg transition-all cursor-pointer"
+                              title="Update Ulang Presensi"
+                            >
+                              Ubah
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-6 py-3.5 bg-slate-50 dark:bg-slate-800/80 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between flex-wrap gap-2 text-xs">
+              <span className="text-slate-500 dark:text-slate-400">
+                Presensi akan dicatat dengan metode <span className="font-bold text-amber-700 dark:text-amber-300">Manual (Lupa ID Card)</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowForgotCardModal(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-200 font-bold rounded-xl transition-all cursor-pointer"
+              >
+                Tutup
               </button>
             </div>
           </div>
