@@ -23,16 +23,27 @@ import {
   syncTeachersToSupabase,
   syncTeacherAttendanceToSupabase,
   syncLogsToSupabase,
+  syncUsersToSupabase,
+  syncSettingsToSupabase,
+  syncDispatchesToSupabase,
   fetchStudentsFromSupabase,
   fetchAttendanceFromSupabase,
   fetchTeachersFromSupabase,
   fetchTeacherAttendanceFromSupabase,
   fetchLogsFromSupabase,
+  fetchUsersFromSupabase,
+  fetchSettingsFromSupabase,
+  fetchDispatchesFromSupabase,
   deleteStudentFromSupabase,
   deleteAttendanceFromSupabase,
   deleteTeacherFromSupabase,
   deleteTeacherAttendanceFromSupabase,
   deleteLogFromSupabase,
+  deleteUserFromSupabase,
+  deleteDispatchFromSupabase,
+  subscribeToSupabaseAttendance,
+  subscribeToSupabaseTeacherAttendance,
+  migrateAllDataToSupabaseCloud,
   getSupabaseClient,
   purgeSaturdayAlpaFromSupabase,
 } from './supabase';
@@ -148,7 +159,7 @@ export const INITIAL_USERS: User[] = [
 
 export interface SyncQueueItem {
   id: string;
-  type: 'attendance' | 'teacher_attendance' | 'student' | 'teacher' | 'log';
+  type: 'attendance' | 'teacher_attendance' | 'student' | 'teacher' | 'log' | 'user' | 'settings' | 'dispatch';
   action: 'upsert' | 'delete';
   data: any;
   timestamp: number;
@@ -447,9 +458,43 @@ class AppStore {
       // Automatic 30-second background retry mechanism for flushing queued attendance records to the server
       this.startBackgroundAttendanceRetry(30000);
 
-      // 3. Real-time Multi-Device synchronization with Firestore
+      // 3. Real-time Multi-Device synchronization with Supabase & Firestore
       try {
         const todayIso = this.getTodayYyyyMmDd();
+        const config = this.getSupabaseConfig();
+        
+        // Supabase Real-time Listeners (Single Primary Database)
+        if (isSupabaseConfigured(config)) {
+          subscribeToSupabaseAttendance((incomingRecord) => {
+            if (!incomingRecord || !incomingRecord.id) return;
+            const idx = this.attendance.findIndex((a) => a.id === incomingRecord.id);
+            if (idx === -1) {
+              this.attendance.unshift(incomingRecord);
+              this.saveLocalData(true);
+              this.notify();
+            } else {
+              this.attendance[idx] = { ...this.attendance[idx], ...incomingRecord };
+              this.saveLocalData(true);
+              this.notify();
+            }
+          }, config);
+
+          subscribeToSupabaseTeacherAttendance((incomingRecord) => {
+            if (!incomingRecord || !incomingRecord.id) return;
+            const idx = this.teacherAttendance.findIndex((ta) => ta.id === incomingRecord.id);
+            if (idx === -1) {
+              this.teacherAttendance.unshift(incomingRecord);
+              this.saveLocalData(true);
+              this.notify();
+            } else {
+              this.teacherAttendance[idx] = { ...this.teacherAttendance[idx], ...incomingRecord };
+              this.saveLocalData(true);
+              this.notify();
+            }
+          }, config);
+        }
+
+        // Firestore Fallback Listeners
         subscribeToTodayAttendance(todayIso, (incomingRecords) => {
           if (!incomingRecords || incomingRecords.length === 0) return;
           let changed = false;
@@ -488,11 +533,12 @@ class AppStore {
       }
     }
 
-    // Synchronize all database records, settings, and users with Firestore cloud in background
+    // Synchronize all database records, settings, and users with Supabase (primary) and Firestore in background
+    await this.syncAllWithSupabase();
     await this.syncAllWithFirestore();
     await this.fetchFromServer();
     this.sanitizeData();
-    // Auto purge lingering Saturday Alpa records across Firestore, Supabase, and local store
+    // Auto purge lingering Saturday Alpa records across Supabase, Firestore, and local store
     await this.purgeSaturdayAlpaAttendance(true);
     if (this.syncQueue.length > 0) {
       this.processPendingSyncQueue();
@@ -891,7 +937,98 @@ class AppStore {
         }
       }
 
-      // 6. Process delete actions
+      // 6. Process app_users items
+      const userUpserts = queueSnapshot
+        .filter((q) => q.type === 'user' && q.action === 'upsert' && q.data)
+        .map((q) => q.data as User);
+
+      if (userUpserts.length > 0) {
+        let firestoreOk = false;
+        try {
+          const results = await Promise.all(userUpserts.map((u) => saveUserToFirestore(u)));
+          firestoreOk = results.some((r) => r === true);
+        } catch {
+          firestoreOk = false;
+        }
+
+        if (hasSupabase) {
+          const res = await syncUsersToSupabase(userUpserts, config);
+          if (res.success || firestoreOk) {
+            queueSnapshot
+              .filter((q) => q.type === 'user' && q.action === 'upsert')
+              .forEach((q) => successfulIds.add(q.id));
+            processedCount += userUpserts.length;
+          }
+        } else if (firestoreOk) {
+          queueSnapshot
+            .filter((q) => q.type === 'user' && q.action === 'upsert')
+            .forEach((q) => successfulIds.add(q.id));
+          processedCount += userUpserts.length;
+        }
+      }
+
+      // 7. Process school_settings items
+      const settingsUpserts = queueSnapshot
+        .filter((q) => q.type === 'settings' && q.action === 'upsert' && q.data)
+        .map((q) => q.data as SchoolSettings);
+
+      if (settingsUpserts.length > 0) {
+        let firestoreOk = false;
+        try {
+          const results = await Promise.all(settingsUpserts.map((st) => saveSettingsToFirestore(st)));
+          firestoreOk = results.some((r) => r === true);
+        } catch {
+          firestoreOk = false;
+        }
+
+        if (hasSupabase) {
+          const lastSettings = settingsUpserts[settingsUpserts.length - 1];
+          const res = await syncSettingsToSupabase(lastSettings, config);
+          if (res.success || firestoreOk) {
+            queueSnapshot
+              .filter((q) => q.type === 'settings' && q.action === 'upsert')
+              .forEach((q) => successfulIds.add(q.id));
+            processedCount += settingsUpserts.length;
+          }
+        } else if (firestoreOk) {
+          queueSnapshot
+            .filter((q) => q.type === 'settings' && q.action === 'upsert')
+            .forEach((q) => successfulIds.add(q.id));
+          processedCount += settingsUpserts.length;
+        }
+      }
+
+      // 8. Process problematic student dispatches items
+      const dispatchUpserts = queueSnapshot
+        .filter((q) => q.type === 'dispatch' && q.action === 'upsert' && q.data)
+        .map((q) => q.data as ProblematicStudentDispatch);
+
+      if (dispatchUpserts.length > 0) {
+        let firestoreOk = false;
+        try {
+          const results = await Promise.all(dispatchUpserts.map((d) => saveDispatchToFirestore(d)));
+          firestoreOk = results.some((r) => r === true);
+        } catch {
+          firestoreOk = false;
+        }
+
+        if (hasSupabase) {
+          const res = await syncDispatchesToSupabase(dispatchUpserts, config);
+          if (res.success || firestoreOk) {
+            queueSnapshot
+              .filter((q) => q.type === 'dispatch' && q.action === 'upsert')
+              .forEach((q) => successfulIds.add(q.id));
+            processedCount += dispatchUpserts.length;
+          }
+        } else if (firestoreOk) {
+          queueSnapshot
+            .filter((q) => q.type === 'dispatch' && q.action === 'upsert')
+            .forEach((q) => successfulIds.add(q.id));
+          processedCount += dispatchUpserts.length;
+        }
+      }
+
+      // 9. Process delete actions
       const deleteItems = queueSnapshot.filter((q) => q.action === 'delete');
       for (const item of deleteItems) {
         try {
@@ -922,6 +1059,20 @@ class AppStore {
             let sOk = false;
             if (hasSupabase) {
               sOk = await deleteTeacherAttendanceFromSupabase(item.id, config);
+            }
+            ok = fOk || sOk;
+          } else if (item.type === 'user') {
+            const fOk = await deleteUserFromFirestore(item.id);
+            let sOk = false;
+            if (hasSupabase) {
+              sOk = await deleteUserFromSupabase(item.id, config);
+            }
+            ok = fOk || sOk;
+          } else if (item.type === 'dispatch') {
+            const fOk = await deleteDispatchFromFirestore(item.id);
+            let sOk = false;
+            if (hasSupabase) {
+              sOk = await deleteDispatchFromSupabase(item.id, config);
             }
             ok = fOk || sOk;
           } else if (item.type === 'log') {
@@ -1093,9 +1244,9 @@ class AppStore {
     this.settings = { ...this.settings, ...newSettings };
     localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(this.settings));
     this.notify();
-    saveSettingsToFirestore(this.settings).catch((err) => {
-      console.warn('Firestore settings update error:', err);
-    });
+    this.enqueueSync({ id: 'school-settings', type: 'settings', action: 'upsert', data: this.settings });
+    saveSettingsToFirestore(this.settings).catch(() => {});
+    syncSettingsToSupabase(this.settings, this.getSupabaseConfig()).catch(() => {});
   }
 
   public getHolidays(): Holiday[] {
@@ -1270,6 +1421,243 @@ class AppStore {
         (u.email && u.email.trim().toLowerCase() === clean) ||
         (u.nip && u.nip.trim() === identifier.trim())
     );
+  }
+
+  public async syncUsersWithSupabase(): Promise<void> {
+    try {
+      const config = this.getSupabaseConfig();
+      if (!isSupabaseConfigured(config)) return;
+
+      const remoteUsers = await fetchUsersFromSupabase(config);
+      if (remoteUsers && remoteUsers.length > 0) {
+        const userMap = new Map<string, User>();
+        this.users.forEach((u) => {
+          if (u.password && !isHashedPassword(u.password)) {
+            u.password = ensureHashedPassword(u.password);
+          }
+          userMap.set(u.uid, u);
+        });
+        remoteUsers.forEach((ru) => {
+          if (ru.password && !isHashedPassword(ru.password)) {
+            ru.password = ensureHashedPassword(ru.password);
+          }
+          userMap.set(ru.uid, ru);
+        });
+        if (!userMap.has('usr-admin')) {
+          userMap.set('usr-admin', INITIAL_USERS[0]);
+        }
+        this.users = Array.from(userMap.values());
+        this.saveLocalData(true);
+        this.notify();
+      } else if (this.users.length > 0) {
+        await syncUsersToSupabase(this.users, config);
+      }
+    } catch (err) {
+      console.warn('Sync users with Supabase notice:', err);
+    }
+  }
+
+  public async syncSettingsWithSupabase(): Promise<void> {
+    try {
+      const config = this.getSupabaseConfig();
+      if (!isSupabaseConfigured(config)) return;
+
+      const remoteSettings = await fetchSettingsFromSupabase(config);
+      if (remoteSettings && Object.keys(remoteSettings).length > 0) {
+        this.settings = {
+          ...this.settings,
+          ...remoteSettings,
+          homeroomAssignments: {
+            ...(this.settings.homeroomAssignments || {}),
+            ...(remoteSettings.homeroomAssignments || {}),
+          },
+          holidays: remoteSettings.holidays && remoteSettings.holidays.length > 0
+            ? remoteSettings.holidays
+            : (this.settings.holidays || []),
+        };
+        localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(this.settings));
+        this.notify();
+      } else {
+        await syncSettingsToSupabase(this.settings, config);
+      }
+    } catch (err) {
+      console.warn('Sync settings with Supabase notice:', err);
+    }
+  }
+
+  public async syncDispatchesWithSupabase(): Promise<void> {
+    try {
+      const config = this.getSupabaseConfig();
+      if (!isSupabaseConfigured(config)) return;
+
+      const remoteDispatches = await fetchDispatchesFromSupabase(config);
+      if (remoteDispatches && remoteDispatches.length > 0) {
+        const dspMap = new Map<string, ProblematicStudentDispatch>();
+        this.dispatches.forEach((d) => dspMap.set(d.id, d));
+        remoteDispatches.forEach((d) => dspMap.set(d.id, d));
+        this.dispatches = Array.from(dspMap.values()).sort((a, b) => {
+          return new Date(b.dispatchedAt || 0).getTime() - new Date(a.dispatchedAt || 0).getTime();
+        });
+        this.saveLocalData(true);
+        this.notify();
+      } else if (this.dispatches.length > 0) {
+        await syncDispatchesToSupabase(this.dispatches, config);
+      }
+    } catch (err) {
+      console.warn('Sync dispatches with Supabase notice:', err);
+    }
+  }
+
+  /**
+   * Synchronize all persistent collections (Users, Settings/Homeroom, Dispatches, Students, Teachers, Attendance, Logs)
+   * with Supabase Cloud PostgreSQL Database (Primary Single Database).
+   */
+  public async syncAllWithSupabase(): Promise<void> {
+    try {
+      const config = this.getSupabaseConfig();
+      if (!isSupabaseConfigured(config)) return;
+
+      // 1. Sync Users
+      await this.syncUsersWithSupabase();
+
+      // 2. Sync Settings
+      await this.syncSettingsWithSupabase();
+
+      // 3. Sync Dispatches
+      await this.syncDispatchesWithSupabase();
+
+      // 4. Sync Students, Teachers, Attendance, Teacher Attendance, Logs
+      const [remoteStudents, remoteAttendance, remoteTeachers, remoteTeacherAtt, remoteLogs] = await Promise.all([
+        fetchStudentsFromSupabase(config),
+        fetchAttendanceFromSupabase(config),
+        fetchTeachersFromSupabase(config),
+        fetchTeacherAttendanceFromSupabase(config),
+        fetchLogsFromSupabase(config),
+      ]);
+
+      let changed = false;
+
+      if (remoteStudents && remoteStudents.length > 0) {
+        const sMap = new Map<string, Student>();
+        this.students.forEach((s) => sMap.set(s.id || s.nisn, s));
+        remoteStudents.forEach((s) => sMap.set(s.id || s.nisn, s));
+        this.students = Array.from(sMap.values());
+        changed = true;
+      } else if (this.students.length > 0) {
+        syncStudentsToSupabase(this.students, config).catch(() => {});
+      }
+
+      if (remoteTeachers && remoteTeachers.length > 0) {
+        const tMap = new Map<string, Teacher>();
+        this.teachers.forEach((t) => tMap.set(t.id || t.nip, t));
+        remoteTeachers.forEach((t) => tMap.set(t.id || t.nip, t));
+        this.teachers = Array.from(tMap.values());
+        changed = true;
+      } else if (this.teachers.length > 0) {
+        syncTeachersToSupabase(this.teachers, config).catch(() => {});
+      }
+
+      if (remoteAttendance && remoteAttendance.length > 0) {
+        const aMap = new Map<string, AttendanceRecord>();
+        this.attendance.forEach((a) => aMap.set(a.id, a));
+        remoteAttendance.forEach((a) => aMap.set(a.id, a));
+        this.attendance = Array.from(aMap.values());
+        changed = true;
+      } else if (this.attendance.length > 0) {
+        syncAttendanceToSupabase(this.attendance, config).catch(() => {});
+      }
+
+      if (remoteTeacherAtt && remoteTeacherAtt.length > 0) {
+        const taMap = new Map<string, TeacherAttendanceRecord>();
+        this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
+        remoteTeacherAtt.forEach((ta) => taMap.set(ta.id, ta));
+        this.teacherAttendance = Array.from(taMap.values());
+        changed = true;
+      } else if (this.teacherAttendance.length > 0) {
+        syncTeacherAttendanceToSupabase(this.teacherAttendance, config).catch(() => {});
+      }
+
+      if (remoteLogs && remoteLogs.length > 0) {
+        const lMap = new Map<string, ActivityLog>();
+        this.logs.forEach((l) => lMap.set(l.id, l));
+        remoteLogs.forEach((l) => lMap.set(l.id, l));
+        this.logs = Array.from(lMap.values()).slice(0, 500);
+        changed = true;
+      } else if (this.logs.length > 0) {
+        syncLogsToSupabase(this.logs, config).catch(() => {});
+      }
+
+      if (changed) {
+        this.saveLocalData(true);
+        this.notify();
+      }
+    } catch (err) {
+      console.warn('Supabase full database synchronization notice:', err);
+    }
+  }
+
+  /**
+   * Complete, safe migration of ALL master data, attendance records,
+   * users, settings, and logs to Supabase Cloud PostgreSQL Database.
+   */
+  public async migrateAllDataToSupabase(
+    onProgress?: (step: string, current: number, total: number) => void
+  ): Promise<{
+    success: boolean;
+    message: string;
+    stats: {
+      students: number;
+      teachers: number;
+      attendance: number;
+      teacherAttendance: number;
+      users: number;
+      dispatches: number;
+      logs: number;
+    };
+  }> {
+    const config = this.getSupabaseConfig();
+    if (!isSupabaseConfigured(config)) {
+      return {
+        success: false,
+        message: 'Supabase URL atau Key belum dikonfigurasi di Pengaturan.',
+        stats: {
+          students: 0,
+          teachers: 0,
+          attendance: 0,
+          teacherAttendance: 0,
+          users: 0,
+          dispatches: 0,
+          logs: 0,
+        },
+      };
+    }
+
+    const res = await migrateAllDataToSupabaseCloud(
+      {
+        students: this.students,
+        attendance: this.attendance,
+        teachers: this.teachers,
+        teacherAttendance: this.teacherAttendance,
+        logs: this.logs,
+        users: this.users,
+        settings: this.settings,
+        dispatches: this.dispatches,
+      },
+      config,
+      onProgress
+    );
+
+    if (res.success) {
+      this.syncQueue = [];
+      try {
+        localStorage.removeItem(STORAGE_KEYS.SYNC_QUEUE);
+      } catch {}
+      this.updateSettings({ lastSupabaseSync: new Date().toISOString() });
+      this.saveLocalData(true);
+      this.notify();
+    }
+
+    return res;
   }
 
   public async syncUsersWithFirestore(): Promise<void> {
@@ -1557,10 +1945,10 @@ class AppStore {
     this.saveLocalData(true);
     this.notify();
 
-    // Persist to Firestore in background (stores secure bcrypt hash)
-    saveUserToFirestore(newUser).catch((err) => {
-      console.warn('Background save user to Firestore failed:', err);
-    });
+    // Persist to Supabase and Firestore
+    this.enqueueSync({ id: newUser.uid, type: 'user', action: 'upsert', data: newUser });
+    saveUserToFirestore(newUser).catch(() => {});
+    syncUsersToSupabase([newUser], this.getSupabaseConfig()).catch(() => {});
 
     this.addLog(
       'TAMBAH_PENGGUNA',
@@ -1610,10 +1998,10 @@ class AppStore {
     this.saveLocalData(true);
     this.notify();
 
-    // Persist update to Firestore
-    saveUserToFirestore(updatedUser).catch((err) => {
-      console.warn('Background update user in Firestore failed:', err);
-    });
+    // Persist update to Supabase and Firestore
+    this.enqueueSync({ id: updatedUser.uid, type: 'user', action: 'upsert', data: updatedUser });
+    saveUserToFirestore(updatedUser).catch(() => {});
+    syncUsersToSupabase([updatedUser], this.getSupabaseConfig()).catch(() => {});
 
     this.addLog('EDIT_PENGGUNA', `Memperbarui akun pengguna: ${updatedUser.name} (@${updatedUser.username})`);
 
@@ -1638,10 +2026,10 @@ class AppStore {
     this.saveLocalData(true);
     this.notify();
 
-    // Delete from Firestore
-    deleteUserFromFirestore(uid).catch((err) => {
-      console.warn('Background delete user in Firestore failed:', err);
-    });
+    // Delete from Supabase and Firestore
+    this.enqueueSync({ id: uid, type: 'user', action: 'delete' });
+    deleteUserFromFirestore(uid).catch(() => {});
+    deleteUserFromSupabase(uid, this.getSupabaseConfig()).catch(() => {});
 
     this.addLog('HAPUS_PENGGUNA', `Menghapus akun pengguna: ${target.name} (@${target.username}) dari database.`);
 
@@ -1672,7 +2060,9 @@ class AppStore {
     this.saveLocalData(true);
     this.notify();
 
+    this.enqueueSync({ id: user.uid, type: 'user', action: 'upsert', data: user });
     saveUserToFirestore(user).catch(() => {});
+    syncUsersToSupabase([user], this.getSupabaseConfig()).catch(() => {});
 
     this.addLog('RESET_PASSWORD_PENGGUNA', `Administrator mereset kata sandi untuk akun: ${user.name} (@${user.username}) dengan enkripsi bcrypt.`);
 
@@ -1859,7 +2249,103 @@ class AppStore {
     try {
       let changed = false;
 
-      // 1. PRIMARY CLOUD DATABASE: Firebase Firestore (Platform Native, High Resilience)
+      // 1. PRIMARY SINGLE DATABASE: Supabase Cloud PostgreSQL
+      const config = this.getSupabaseConfig();
+      if (isSupabaseConfigured(config)) {
+        try {
+          const [
+            remoteStudents,
+            remoteAttendance,
+            remoteTeachers,
+            remoteTeacherAttendance,
+            remoteLogs,
+            remoteUsers,
+            remoteSettings,
+            remoteDispatches,
+          ] = await Promise.all([
+            fetchStudentsFromSupabase(config),
+            fetchAttendanceFromSupabase(config),
+            fetchTeachersFromSupabase(config),
+            fetchTeacherAttendanceFromSupabase(config),
+            fetchLogsFromSupabase(config),
+            fetchUsersFromSupabase(config),
+            fetchSettingsFromSupabase(config),
+            fetchDispatchesFromSupabase(config),
+          ]);
+
+          if (remoteStudents !== null && remoteStudents.length > 0) {
+            const sMap = new Map<string, Student>();
+            this.students.forEach((s) => sMap.set(s.id || s.nisn, s));
+            remoteStudents.forEach((s) => sMap.set(s.id || s.nisn, s));
+            this.students = Array.from(sMap.values());
+            changed = true;
+          }
+
+          if (remoteAttendance !== null && remoteAttendance.length > 0) {
+            const aMap = new Map<string, AttendanceRecord>();
+            this.attendance.forEach((a) => aMap.set(a.id, a));
+            remoteAttendance.forEach((a) => aMap.set(a.id, a));
+            this.attendance = Array.from(aMap.values());
+            changed = true;
+          }
+
+          if (remoteTeachers !== null && remoteTeachers.length > 0) {
+            const tMap = new Map<string, Teacher>();
+            this.teachers.forEach((t) => tMap.set(t.id || t.nip, t));
+            remoteTeachers.forEach((t) => tMap.set(t.id || t.nip, t));
+            this.teachers = Array.from(tMap.values());
+            changed = true;
+          }
+
+          if (remoteTeacherAttendance !== null && remoteTeacherAttendance.length > 0) {
+            const taMap = new Map<string, TeacherAttendanceRecord>();
+            this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
+            remoteTeacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
+            this.teacherAttendance = Array.from(taMap.values());
+            changed = true;
+          }
+
+          if (remoteLogs !== null && remoteLogs.length > 0) {
+            const lMap = new Map<string, ActivityLog>();
+            this.logs.forEach((l) => lMap.set(l.id, l));
+            remoteLogs.forEach((l) => lMap.set(l.id, l));
+            this.logs = Array.from(lMap.values()).slice(0, 500);
+            changed = true;
+          }
+
+          if (remoteUsers !== null && remoteUsers.length > 0) {
+            const uMap = new Map<string, User>();
+            this.users.forEach((u) => uMap.set(u.uid, u));
+            remoteUsers.forEach((u) => uMap.set(u.uid, u));
+            this.users = Array.from(uMap.values());
+            changed = true;
+          }
+
+          if (remoteSettings !== null && Object.keys(remoteSettings).length > 0) {
+            this.settings = {
+              ...this.settings,
+              ...remoteSettings,
+              homeroomAssignments: {
+                ...(this.settings.homeroomAssignments || {}),
+                ...(remoteSettings.homeroomAssignments || {}),
+              },
+            };
+            changed = true;
+          }
+
+          if (remoteDispatches !== null && remoteDispatches.length > 0) {
+            const dMap = new Map<string, ProblematicStudentDispatch>();
+            this.dispatches.forEach((d) => dMap.set(d.id, d));
+            remoteDispatches.forEach((d) => dMap.set(d.id, d));
+            this.dispatches = Array.from(dMap.values());
+            changed = true;
+          }
+        } catch (sErr) {
+          console.warn('Supabase fetch notice:', sErr);
+        }
+      }
+
+      // 2. BACKUP / MERGE CLOUD DATABASE: Firebase Firestore (Fail-safe)
       try {
         const [
           remoteStudents,
@@ -1875,7 +2361,7 @@ class AppStore {
           fetchLogsFromFirestore(),
         ]);
 
-        if (remoteStudents && remoteStudents.length > 0) {
+        if (remoteStudents && remoteStudents.length > 0 && this.students.length === 0) {
           const sMap = new Map<string, Student>();
           this.students.forEach((s) => sMap.set(s.id || s.nisn, s));
           remoteStudents.forEach((s) => sMap.set(s.id || s.nisn, s));
@@ -1886,12 +2372,16 @@ class AppStore {
         if (remoteAttendance && remoteAttendance.length > 0) {
           const aMap = new Map<string, AttendanceRecord>();
           this.attendance.forEach((a) => aMap.set(a.id, a));
-          remoteAttendance.forEach((a) => aMap.set(a.id, a));
+          remoteAttendance.forEach((a) => {
+            if (!aMap.has(a.id)) {
+              aMap.set(a.id, a);
+              changed = true;
+            }
+          });
           this.attendance = Array.from(aMap.values());
-          changed = true;
         }
 
-        if (remoteTeachers && remoteTeachers.length > 0) {
+        if (remoteTeachers && remoteTeachers.length > 0 && this.teachers.length === 0) {
           const tMap = new Map<string, Teacher>();
           this.teachers.forEach((t) => tMap.set(t.id || t.nip, t));
           remoteTeachers.forEach((t) => tMap.set(t.id || t.nip, t));
@@ -1902,12 +2392,16 @@ class AppStore {
         if (remoteTeacherAttendance && remoteTeacherAttendance.length > 0) {
           const taMap = new Map<string, TeacherAttendanceRecord>();
           this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
-          remoteTeacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
+          remoteTeacherAttendance.forEach((ta) => {
+            if (!taMap.has(ta.id)) {
+              taMap.set(ta.id, ta);
+              changed = true;
+            }
+          });
           this.teacherAttendance = Array.from(taMap.values());
-          changed = true;
         }
 
-        if (remoteLogs && remoteLogs.length > 0) {
+        if (remoteLogs && remoteLogs.length > 0 && this.logs.length === 0) {
           const lMap = new Map<string, ActivityLog>();
           this.logs.forEach((l) => lMap.set(l.id, l));
           remoteLogs.forEach((l) => lMap.set(l.id, l));
@@ -1915,58 +2409,7 @@ class AppStore {
           changed = true;
         }
       } catch (fErr) {
-        console.warn('Firestore primary fetch notice:', fErr);
-      }
-
-      // 2. OPTIONAL SECONDARY MIRROR: Supabase (if configured)
-      const config = this.getSupabaseConfig();
-      if (isSupabaseConfigured(config)) {
-        try {
-          const [remoteStudents, remoteAttendance, remoteTeachers, remoteTeacherAttendance, remoteLogs] = await Promise.all([
-            fetchStudentsFromSupabase(config),
-            fetchAttendanceFromSupabase(config),
-            fetchTeachersFromSupabase(config),
-            fetchTeacherAttendanceFromSupabase(config),
-            fetchLogsFromSupabase(config),
-          ]);
-
-          if (remoteStudents !== null && remoteStudents.length > 0 && this.students.length === 0) {
-            this.students = remoteStudents;
-            changed = true;
-          }
-          if (remoteAttendance !== null && remoteAttendance.length > 0) {
-            const aMap = new Map<string, AttendanceRecord>();
-            this.attendance.forEach((a) => aMap.set(a.id, a));
-            remoteAttendance.forEach((a) => {
-              if (!aMap.has(a.id)) {
-                aMap.set(a.id, a);
-                changed = true;
-              }
-            });
-            this.attendance = Array.from(aMap.values());
-          }
-          if (remoteTeachers !== null && remoteTeachers.length > 0 && this.teachers.length === 0) {
-            this.teachers = remoteTeachers;
-            changed = true;
-          }
-          if (remoteTeacherAttendance !== null && remoteTeacherAttendance.length > 0) {
-            const taMap = new Map<string, TeacherAttendanceRecord>();
-            this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
-            remoteTeacherAttendance.forEach((ta) => {
-              if (!taMap.has(ta.id)) {
-                taMap.set(ta.id, ta);
-                changed = true;
-              }
-            });
-            this.teacherAttendance = Array.from(taMap.values());
-          }
-          if (remoteLogs !== null && remoteLogs.length > 0 && this.logs.length === 0) {
-            this.logs = remoteLogs;
-            changed = true;
-          }
-        } catch (sErr) {
-          console.warn('Supabase secondary mirror notice:', sErr);
-        }
+        console.warn('Firestore fallback fetch notice:', fErr);
       }
 
       this.processAutoAlpa();
@@ -1986,12 +2429,15 @@ class AppStore {
         return { success: false, message: 'Supabase URL atau Key belum dikonfigurasi di Pengaturan.', remainingQueue: this.syncQueue.length };
       }
 
-      const [sRes, aRes, tRes, taRes, lRes] = await Promise.all([
+      const [sRes, aRes, tRes, taRes, lRes, uRes, setRes, dRes] = await Promise.all([
         syncStudentsToSupabase(this.students, config),
         syncAttendanceToSupabase(this.attendance, config),
         syncTeachersToSupabase(this.teachers, config),
         syncTeacherAttendanceToSupabase(this.teacherAttendance, config),
         syncLogsToSupabase(this.logs, config),
+        syncUsersToSupabase(this.users, config),
+        syncSettingsToSupabase(this.settings, config),
+        syncDispatchesToSupabase(this.dispatches, config),
       ]);
 
       const errors: string[] = [];
@@ -2000,6 +2446,9 @@ class AppStore {
       if (!tRes.success) errors.push(`Guru: ${tRes.error || 'Gagal'}`);
       if (!taRes.success) errors.push(`Presensi Guru: ${taRes.error || 'Gagal'}`);
       if (!lRes.success) errors.push(`Log: ${lRes.error || 'Gagal'}`);
+      if (!uRes.success) errors.push(`Pengguna: ${uRes.error || 'Gagal'}`);
+      if (!setRes.success) errors.push(`Pengaturan: ${setRes.error || 'Gagal'}`);
+      if (!dRes.success) errors.push(`Disposisi: ${dRes.error || 'Gagal'}`);
 
       if (errors.length === 0) {
         const hadQueue = this.syncQueue.length;
@@ -2012,14 +2461,23 @@ class AppStore {
         this.notify();
 
         const queueMsg = hadQueue > 0 ? ` serta membersihkan ${hadQueue} antrian pengiriman (0 antrian tersisa)` : ' (0 antrian tersisa)';
-        const msg = `Berhasil menyelaraskan ${sRes.count} siswa, ${aRes.count} presensi siswa, ${tRes.count} guru, ${taRes.count} presensi guru, dan ${lRes.count} log ke Supabase Cloud PostgreSQL${queueMsg}.`;
+        const msg = `Berhasil menyelaraskan ${sRes.count} siswa, ${aRes.count} presensi siswa, ${tRes.count} guru, ${taRes.count} presensi guru, ${uRes.count} akun, ${dRes.count} disposisi, dan ${lRes.count} log ke Supabase Cloud PostgreSQL${queueMsg}.`;
         this.updateSettings({ lastSupabaseSync: new Date().toISOString() });
         return { success: true, message: msg, remainingQueue: 0 };
       }
 
+      // If core attendance and master data succeeded, clear their queue items and update sync time
+      const coreSucceeded = sRes.success && aRes.success && tRes.success && taRes.success;
+      if (coreSucceeded) {
+        this.syncQueue = this.syncQueue.filter((q) => q.type === 'user' || q.type === 'settings' || q.type === 'dispatch');
+        this.saveLocalData(true);
+        this.notify();
+        this.updateSettings({ lastSupabaseSync: new Date().toISOString() });
+      }
+
       return {
         success: false,
-        message: `Gagal menyelaraskan sebagian data: ${errors.join(' | ')}`,
+        message: `Catatan sinkronisasi data: ${errors.join(' | ')}`,
         remainingQueue: this.syncQueue.length,
       };
     } catch (err: any) {
@@ -2032,8 +2490,26 @@ class AppStore {
       const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
       if (!isOnline) throw new Error('Koneksi internet terputus.');
 
-      const records = await fetchAttendanceFromFirestore(startDate, endDate);
-      const teacherRecords = await fetchTeacherAttendanceFromFirestore(startDate, endDate);
+      const config = this.getSupabaseConfig();
+      let records: AttendanceRecord[] = [];
+      let teacherRecords: TeacherAttendanceRecord[] = [];
+
+      if (isSupabaseConfigured(config)) {
+        const sRecords = await fetchAttendanceFromSupabase(config, startDate, endDate);
+        const stRecords = await fetchTeacherAttendanceFromSupabase(config, startDate, endDate);
+        if (sRecords && sRecords.length > 0) records = sRecords;
+        if (stRecords && stRecords.length > 0) teacherRecords = stRecords;
+      }
+
+      // If Supabase returned empty, fallback check Firestore
+      if (records.length === 0) {
+        const fRecords = await fetchAttendanceFromFirestore(startDate, endDate);
+        if (fRecords && fRecords.length > 0) records = fRecords;
+      }
+      if (teacherRecords.length === 0) {
+        const ftRecords = await fetchTeacherAttendanceFromFirestore(startDate, endDate);
+        if (ftRecords && ftRecords.length > 0) teacherRecords = ftRecords;
+      }
 
       if (records.length > 0) {
         const aMap = new Map<string, AttendanceRecord>();
@@ -3583,7 +4059,8 @@ class AppStore {
     const dayRecords = this.attendance.filter((a) => this.isRecordForDate(a, normTarget));
 
     const targetStudents = this.students.filter((s) => {
-      if (s.status === 'nonaktif') return false;
+      const st = String(s.status || 'aktif').trim().toLowerCase();
+      if (st === 'nonaktif' || st === 'tidak aktif' || st === 'inactive') return false;
       if (filterKelas !== 'Semua' && s.kelas !== filterKelas) return false;
       return true;
     });
@@ -3677,7 +4154,8 @@ class AppStore {
     const dayRecords = this.attendance.filter((a) => this.isRecordForDate(a, normTarget));
 
     const targetStudents = this.students.filter((s) => {
-      if (s.status === 'nonaktif') return false;
+      const st = String(s.status || 'aktif').trim().toLowerCase();
+      if (st === 'nonaktif' || st === 'tidak aktif' || st === 'inactive') return false;
       if (filterKelas !== 'Semua' && s.kelas !== filterKelas) return false;
       return true;
     });
@@ -4570,10 +5048,10 @@ class AppStore {
     this.saveLocalData();
     this.notify();
 
-    // Persist to Firestore in background
-    saveDispatchToFirestore(newDispatch).catch((err) => {
-      console.warn('Firestore dispatch save error:', err);
-    });
+    // Persist to Supabase and Firestore
+    this.enqueueSync({ id: newDispatch.id, type: 'dispatch', action: 'upsert', data: newDispatch });
+    saveDispatchToFirestore(newDispatch).catch(() => {});
+    syncDispatchesToSupabase([newDispatch], this.getSupabaseConfig()).catch(() => {});
 
     this.addLog(
       'DISPOSISI_WALI_KELAS',
@@ -4600,10 +5078,10 @@ class AppStore {
     this.saveLocalData();
     this.notify();
 
-    // Persist status update to Firestore
-    saveDispatchToFirestore(this.dispatches[idx]).catch((err) => {
-      console.warn('Firestore dispatch update error:', err);
-    });
+    // Persist status update to Supabase and Firestore
+    this.enqueueSync({ id: this.dispatches[idx].id, type: 'dispatch', action: 'upsert', data: this.dispatches[idx] });
+    saveDispatchToFirestore(this.dispatches[idx]).catch(() => {});
+    syncDispatchesToSupabase([this.dispatches[idx]], this.getSupabaseConfig()).catch(() => {});
 
     this.addLog(
       'UPDATE_DISPOSISI',
@@ -4619,9 +5097,10 @@ class AppStore {
     this.saveLocalData();
     this.notify();
 
-    deleteDispatchFromFirestore(id).catch((err) => {
-      console.warn('Firestore dispatch delete error:', err);
-    });
+    // Delete from Supabase and Firestore
+    this.enqueueSync({ id, type: 'dispatch', action: 'delete' });
+    deleteDispatchFromFirestore(id).catch(() => {});
+    deleteDispatchFromSupabase(id, this.getSupabaseConfig()).catch(() => {});
 
     this.addLog('HAPUS_DISPOSISI', `Riwayat disposisi siswa ${target.studentName} dihapus.`);
     return true;
@@ -4634,7 +5113,9 @@ class AppStore {
     this.notify();
 
     ids.forEach((id) => {
+      this.enqueueSync({ id, type: 'dispatch', action: 'delete' });
       deleteDispatchFromFirestore(id).catch(() => {});
+      deleteDispatchFromSupabase(id, this.getSupabaseConfig()).catch(() => {});
     });
 
     this.addLog('CLEAR_DISPOSISI', 'Seluruh riwayat disposisi ke wali kelas telah dibersihkan.');
@@ -4756,11 +5237,17 @@ class AppStore {
     aiRecommendation: string;
     latestDispatch?: ProblematicStudentDispatch;
   }> {
-    const activeStudents = this.students.filter((s) => s.status === 'aktif');
+    const isStudentActive = (s: Student) => {
+      const st = String(s.status || 'aktif').trim().toLowerCase();
+      return st !== 'nonaktif' && st !== 'tidak aktif' && st !== 'inactive';
+    };
+    const activeStudents = this.students.filter(isStudentActive);
+    const inactiveNisns = new Set(this.students.filter((s) => !isStudentActive(s)).map((s) => s.nisn).filter(Boolean));
     const isFilteredMonth = Boolean(options?.bulan && options.bulan !== 'Semua');
-    const scopedAttendance = isFilteredMonth
+    const scopedAttendance = (isFilteredMonth
       ? this.attendance.filter((a) => a.tanggal.startsWith(options!.bulan!))
-      : this.attendance;
+      : this.attendance
+    ).filter((a) => !inactiveNisns.has(a.nisn));
 
     const allUniqueDates = Array.from(new Set(scopedAttendance.map((a) => a.tanggal)));
     const totalRecordedDays = Math.max(allUniqueDates.length, 1);

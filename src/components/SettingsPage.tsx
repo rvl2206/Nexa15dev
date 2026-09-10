@@ -11,6 +11,7 @@ import {
 } from '../lib/supabase';
 import { toast } from '../lib/toast';
 import { SchoolLogo } from './SchoolLogo';
+import { SupabaseHealthDashboard } from './SupabaseHealthDashboard';
 import {
   Settings,
   School,
@@ -372,10 +373,140 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ userRole = 'Admin' }
     toast.info('Logo Kustom Dihapus', 'Sistem kembali menggunakan lambang sekolah default.');
   };
 
+  // Provinsi Logo Upload State
+  const provinsiFileInputRef = useRef<HTMLInputElement>(null);
+  const [isProcessingProvinsiLogo, setIsProcessingProvinsiLogo] = useState(false);
+  const [isDraggingProvinsiLogo, setIsDraggingProvinsiLogo] = useState(false);
+
+  const processProvinsiLogoFile = (file: File) => {
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Format File Salah', 'Harap pilih file gambar (PNG, JPG, SVG, atau WebP).');
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Ukuran File Terlalu Besar', 'Maksimum ukuran gambar logo adalah 5MB.');
+      return;
+    }
+
+    setIsProcessingProvinsiLogo(true);
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+      const result = event.target?.result as string;
+      if (!result) {
+        setIsProcessingProvinsiLogo(false);
+        return;
+      }
+
+      // If SVG, save directly to keep clean vector paths
+      if (file.type.includes('svg') || result.startsWith('data:image/svg+xml')) {
+        setSettings((prev) => ({ ...prev, provinsiLogo: result }));
+        store.updateSettings({ provinsiLogo: result });
+        setIsProcessingProvinsiLogo(false);
+        toast.success('Logo Provinsi Berhasil Diperbarui', 'Logo vektor SVG telah diterapkan.');
+        return;
+      }
+
+      // If raster image (PNG, JPG, WebP), scale onto a crisp canvas
+      const img = new window.Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          const maxDim = 512;
+          let w = img.width;
+          let h = img.height;
+
+          if (w > h) {
+            if (w > maxDim) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            }
+          } else {
+            if (h > maxDim) {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+            ctx.drawImage(img, 0, 0, w, h);
+            const optimizedBase64 = canvas.toDataURL('image/png', 0.95);
+            setSettings((prev) => ({ ...prev, provinsiLogo: optimizedBase64 }));
+            store.updateSettings({ provinsiLogo: optimizedBase64 });
+            setIsProcessingProvinsiLogo(false);
+            toast.success('Logo Provinsi Berhasil Diperbarui', 'Logo provinsi baru telah diunggah.');
+          } else {
+            setSettings((prev) => ({ ...prev, provinsiLogo: result }));
+            store.updateSettings({ provinsiLogo: result });
+            setIsProcessingProvinsiLogo(false);
+            toast.success('Logo Provinsi Berhasil Diperbarui', 'Logo provinsi baru telah disimpan.');
+          }
+        } catch {
+          setSettings((prev) => ({ ...prev, provinsiLogo: result }));
+          store.updateSettings({ provinsiLogo: result });
+          setIsProcessingProvinsiLogo(false);
+          toast.success('Logo Provinsi Berhasil Diperbarui', 'Logo provinsi baru telah disimpan.');
+        }
+      };
+
+      img.onerror = () => {
+        setIsProcessingProvinsiLogo(false);
+        toast.error('Gagal Membaca Gambar', 'Pastikan file gambar valid dan tidak rusak.');
+      };
+
+      img.src = result;
+    };
+
+    reader.onerror = () => {
+      setIsProcessingProvinsiLogo(false);
+      toast.error('Gagal Mengunggah', 'Terjadi kesalahan saat membaca file.');
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const handleProvinsiLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files[0]) {
+      processProvinsiLogoFile(files[0]);
+    }
+    if (e.target) {
+      e.target.value = '';
+    }
+  };
+
+  const handleProvinsiLogoDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingProvinsiLogo(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processProvinsiLogoFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleRemoveProvinsiLogo = () => {
+    setSettings((prev) => ({ ...prev, provinsiLogo: '' }));
+    store.updateSettings({ provinsiLogo: '' });
+    toast.info('Logo Provinsi Dihapus', 'Sistem kembali menggunakan lambang provinsi default.');
+  };
+
   // Supabase Integration States
   const [isTestingSupabase, setIsTestingSupabase] = useState(false);
-  const [supabaseTestStatus, setSupabaseTestStatus] = useState<{ success?: boolean; message?: string; missingTables?: string[] } | null>(null);
+  const [supabaseTestStatus, setSupabaseTestStatus] = useState<{
+    success?: boolean;
+    message?: string;
+    tablesFound?: string[];
+    missingTables?: string[];
+  } | null>(null);
   const [isSyncingSupabase, setIsSyncingSupabase] = useState(false);
+  const [isMigratingSupabase, setIsMigratingSupabase] = useState(false);
   const [showSupabaseSchema, setShowSupabaseSchema] = useState(false);
   const [copiedSupabaseSchema, setCopiedSupabaseSchema] = useState(false);
   const [copiedTeacherSchema, setCopiedTeacherSchema] = useState(false);
@@ -416,7 +547,29 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ userRole = 'Admin' }
     if (res.success) {
       toast.success('Sinkronisasi Supabase Sukses', res.message);
     } else {
-      toast.error('Gagal Sinkronisasi', res.message);
+      toast.error('Catatan Sinkronisasi', res.message);
+    }
+  };
+
+  const handleMigrateSupabase = async () => {
+    if (!settings.supabaseUrl || !settings.supabaseKey) {
+      toast.error('Konfigurasi Belum Lengkap', 'Harap isi URL Project dan API Key Supabase sebelum migrasi.');
+      return;
+    }
+    setIsMigratingSupabase(true);
+    try {
+      const res = await store.migrateAllDataToSupabase();
+      setSettings(store.getSettings());
+      setSyncQueueInfo(store.getSyncQueueDetails());
+      if (res.success) {
+        toast.success('Migrasi Supabase Berhasil!', res.message);
+      } else {
+        toast.error('Migrasi Selesai dengan Catatan', res.message);
+      }
+    } catch (err: any) {
+      toast.error('Gagal Migrasi Supabase', err?.message || 'Terjadi gangguan jaringan');
+    } finally {
+      setIsMigratingSupabase(false);
     }
   };
 
@@ -673,13 +826,84 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ userRole = 'Admin' }
         </div>
 
         <form onSubmit={handleSave} className="space-y-6">
-          {/* Logo Sekolah Upload & Auto-Fit Layout Section */}
-          <div className="bg-gradient-to-br from-slate-50 to-blue-50/40 dark:from-slate-800/60 dark:to-blue-950/20 p-5 rounded-2xl border border-slate-200 dark:border-slate-700/80 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                  <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                  <span>Logo Sekolah & Identitas Visual</span>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Logo Provinsi Upload Section */}
+            <div className="bg-gradient-to-br from-slate-50 to-blue-50/40 dark:from-slate-800/60 dark:to-blue-950/20 p-5 rounded-2xl border border-slate-200 dark:border-slate-700/80 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                    <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>Logo Provinsi (Kop Surat Kiri)</span>
+                    {settings.provinsiLogo ? (
+                      <span className="bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-400 text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                        Logo Kustom Aktif
+                      </span>
+                    ) : null}
+                  </h4>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 max-w-sm">
+                    Unggah logo pemerintah provinsi atau daerah. Sistem akan otomatis menyesuaikan ukuran (auto-fit) di laporan cetak.
+                  </p>
+                </div>
+                {settings.provinsiLogo && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveProvinsiLogo}
+                    className="shrink-0 flex items-center justify-center gap-1.5 px-3 py-1.5 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:hover:bg-red-500/20 text-red-600 dark:text-red-400 rounded-lg text-xs font-semibold transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Hapus Logo</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Hidden Input File */}
+              <input
+                type="file"
+                ref={provinsiFileInputRef}
+                onChange={handleProvinsiLogoFileChange}
+                accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                className="hidden"
+              />
+
+              {/* Upload Dropzone / Preview */}
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingProvinsiLogo(true);
+                }}
+                onDragLeave={() => setIsDraggingProvinsiLogo(false)}
+                onDrop={handleProvinsiLogoDrop}
+                onClick={() => provinsiFileInputRef.current?.click()}
+                className={`p-5 rounded-2xl border-2 border-dashed transition-all text-center cursor-pointer flex flex-col items-center justify-center gap-3 ${
+                  isDraggingProvinsiLogo
+                    ? 'border-blue-500 bg-blue-50 dark:bg-blue-950/50 scale-[1.01]'
+                    : 'border-slate-300 dark:border-slate-700 hover:border-blue-400 hover:bg-white/80 dark:hover:bg-slate-800/80 bg-white/50 dark:bg-slate-900/50'
+                }`}
+              >
+                <div className="w-16 h-16 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-sm flex items-center justify-center p-2 mb-1">
+                  {settings.provinsiLogo ? (
+                    <img src={settings.provinsiLogo} alt="Logo Provinsi" className="w-full h-full object-contain drop-shadow-xs" />
+                  ) : (
+                    <UploadCloud className={`w-8 h-8 ${isDraggingProvinsiLogo ? 'text-blue-500' : 'text-slate-400 dark:text-slate-500'}`} />
+                  )}
+                </div>
+                
+                <div className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                  <span>{isProcessingProvinsiLogo ? 'Memproses Logo...' : 'Pilih File Logo Provinsi'}</span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-[250px]">
+                  atau tarik dan lepas (drag & drop) file logo ke sini
+                </p>
+              </div>
+            </div>
+
+            {/* Logo Sekolah Upload & Auto-Fit Layout Section */}
+            <div className="bg-gradient-to-br from-slate-50 to-blue-50/40 dark:from-slate-800/60 dark:to-blue-950/20 p-5 rounded-2xl border border-slate-200 dark:border-slate-700/80 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs font-extrabold text-slate-900 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                    <ImageIcon className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    <span>Logo Sekolah (Kop Surat Kanan)</span>
                   {settings.schoolLogo ? (
                     <span className="px-2 py-0.5 bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 rounded-full text-[10px] font-bold">
                       Logo Kustom Aktif
@@ -808,6 +1032,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ userRole = 'Admin' }
                 </div>
               </div>
             </div>
+          </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1682,69 +1907,205 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ userRole = 'Admin' }
               {/* TAB 1: SUPABASE CLOUD (EXISTING FUNCTIONALITY) */}
               {activeDbTab === 'supabase' && (
                 <div className="space-y-4 pt-1">
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                        URL Project Supabase
-                      </label>
-                      <input
-                        type="url"
-                        value={settings.supabaseUrl || ''}
-                        onChange={(e) => setSettings({ ...settings, supabaseUrl: e.target.value })}
-                        placeholder="https://xyzcompany.supabase.co"
-                        className="w-full px-3.5 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-emerald-600 font-mono"
-                      />
+                  {/* REAL-TIME HEALTH & QUOTA MONITORING DASHBOARD */}
+                  <SupabaseHealthDashboard
+                    supabaseUrl={settings.supabaseUrl}
+                    supabaseKey={settings.supabaseKey}
+                    onCopySchema={handleCopySupabaseSchema}
+                    onTriggerMigrate={handleMigrateSupabase}
+                    onTriggerSync={handleSyncSupabase}
+                    isMigrating={isMigratingSupabase}
+                    isSyncing={isSyncingSupabase}
+                  />
+
+                  {/* SUPABASE CONNECTION CREDENTIALS */}
+                  <div className="p-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                          <KeyRound className="w-4 h-4 text-emerald-600" />
+                          Kredensial API Project Supabase
+                        </h4>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                          Masukkan URL dan anon/service API key yang diperoleh dari Supabase Dashboard &gt; Project Settings &gt; API.
+                        </p>
+                      </div>
                     </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                        API Key Supabase (Anon / Service Key)
-                      </label>
-                      <input
-                        type="password"
-                        value={settings.supabaseKey || ''}
-                        onChange={(e) => setSettings({ ...settings, supabaseKey: e.target.value })}
-                        placeholder="eyJhbGciOiJIUzI1NiIsInR5..."
-                        className="w-full px-3.5 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-emerald-600 font-mono"
-                      />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          URL Project Supabase
+                        </label>
+                        <input
+                          type="url"
+                          value={settings.supabaseUrl || ''}
+                          onChange={(e) => setSettings({ ...settings, supabaseUrl: e.target.value })}
+                          placeholder="https://xyzcompany.supabase.co"
+                          className="w-full px-3.5 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-emerald-600 font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                          API Key Supabase (Anon / Service Key)
+                        </label>
+                        <input
+                          type="password"
+                          value={settings.supabaseKey || ''}
+                          onChange={(e) => setSettings({ ...settings, supabaseKey: e.target.value })}
+                          placeholder="eyJhbGciOiJIUzI1NiIsInR5..."
+                          className="w-full px-3.5 py-2 text-xs border border-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-xl focus:ring-2 focus:ring-emerald-600 font-mono"
+                        />
+                      </div>
                     </div>
-                  </div>
 
-                  <div className="flex justify-between items-center pt-1">
-                    <button
-                      type="button"
-                      onClick={handleCopySupabaseSchema}
-                      className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
-                    >
-                      {copiedSupabaseSchema ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Code2 className="w-3.5 h-3.5" />}
-                      <span>{copiedSupabaseSchema ? 'SQL Disalin!' : 'Salin SQL Supabase RLS'}</span>
-                    </button>
+                    <div className="flex flex-wrap justify-between items-center gap-2 pt-1">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleCopySupabaseSchema}
+                          className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+                        >
+                          {copiedSupabaseSchema ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Code2 className="w-3.5 h-3.5 text-emerald-400" />}
+                          <span>{copiedSupabaseSchema ? 'SQL Disalin!' : 'Salin Skrip SQL Supabase (8 Tabel)'}</span>
+                        </button>
 
-                    <button
-                      type="button"
-                      onClick={handleTestSupabase}
-                      disabled={isTestingSupabase || !settings.supabaseUrl || !settings.supabaseKey}
-                      className="px-4 py-2 bg-emerald-100 dark:bg-emerald-950 hover:bg-emerald-200 dark:hover:bg-emerald-900 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800 rounded-xl text-xs font-bold transition-all disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Zap className={`w-3.5 h-3.5 ${isTestingSupabase ? 'animate-spin text-emerald-600' : ''}`} />
-                      <span>{isTestingSupabase ? 'Menguji Koneksi...' : 'Uji Koneksi Supabase'}</span>
-                    </button>
+                        <button
+                          type="button"
+                          onClick={() => setShowSupabaseSchema(!showSupabaseSchema)}
+                          className="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-bold text-xs rounded-xl transition-all flex items-center gap-1 cursor-pointer"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>{showSupabaseSchema ? 'Tutup SQL' : 'Lihat Skrip SQL'}</span>
+                        </button>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleTestSupabase}
+                          disabled={isTestingSupabase || !settings.supabaseUrl || !settings.supabaseKey}
+                          className="px-3.5 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-emerald-50 dark:hover:bg-emerald-950/60 text-slate-700 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 border border-slate-300 dark:border-slate-700 rounded-xl text-xs font-bold transition-all disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Zap className={`w-3.5 h-3.5 ${isTestingSupabase ? 'animate-spin text-emerald-600' : ''}`} />
+                          <span>{isTestingSupabase ? 'Menguji...' : 'Uji Koneksi'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleMigrateSupabase}
+                          disabled={isMigratingSupabase || !settings.supabaseUrl || !settings.supabaseKey}
+                          className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl transition-all disabled:opacity-50 flex items-center gap-1.5 cursor-pointer shadow-sm"
+                        >
+                          <Database className={`w-3.5 h-3.5 ${isMigratingSupabase ? 'animate-spin' : ''}`} />
+                          <span>{isMigratingSupabase ? 'Memigrasikan...' : 'Migrasi Penuh ke Supabase'}</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {showSupabaseSchema && (
+                      <div className="p-3 bg-slate-950 text-slate-200 rounded-xl border border-slate-800 text-[11px] font-mono space-y-2">
+                        <div className="flex items-center justify-between text-xs font-sans pb-1 border-b border-slate-800">
+                          <span className="font-bold text-emerald-400 flex items-center gap-1.5">
+                            <Code2 className="w-3.5 h-3.5" />
+                            Skrip DDL SQL Supabase (Lengkap dengan RLS & Index):
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleCopySupabaseSchema}
+                            className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-[10px] cursor-pointer"
+                          >
+                            {copiedSupabaseSchema ? 'Disalin!' : 'Salin Semua'}
+                          </button>
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-sans">
+                          Petunjuk: Buka Dashboard Supabase &gt; <b>SQL Editor</b> &gt; Klik <b>New Query</b> &gt; Tempel (Paste) skrip ini &gt; Klik <b>Run</b>.
+                        </div>
+                        <pre className="max-h-52 overflow-y-auto p-2 bg-slate-900 rounded text-[10px] leading-relaxed select-all">
+                          {getSupabaseSchemaSQL()}
+                        </pre>
+                      </div>
+                    )}
                   </div>
 
                   {supabaseTestStatus && (
                     <div
-                      className={`p-3 rounded-xl text-xs font-bold flex items-start gap-2 ${
-                        supabaseTestStatus.success
-                          ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-900 dark:text-emerald-200 border border-emerald-300'
-                          : 'bg-rose-100 dark:bg-rose-950/80 text-rose-900 dark:text-rose-200 border border-rose-300'
+                      className={`p-3.5 rounded-xl text-xs flex flex-col gap-2.5 ${
+                        supabaseTestStatus.success && (!supabaseTestStatus.missingTables || supabaseTestStatus.missingTables.length === 0)
+                          ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-900 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800'
+                          : 'bg-amber-50 dark:bg-amber-950/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-800'
                       }`}
                     >
-                      {supabaseTestStatus.success ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                      ) : (
-                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                      <div className="flex items-start gap-2">
+                        {supabaseTestStatus.success && (!supabaseTestStatus.missingTables || supabaseTestStatus.missingTables.length === 0) ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                        )}
+                        <div className="space-y-1 flex-1">
+                          <span className="font-bold leading-relaxed block">{supabaseTestStatus.message}</span>
+                        </div>
+                      </div>
+
+                      {/* Detail 8 Tabel Supabase */}
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
+                        {[
+                          { id: 'students', label: 'Master Siswa' },
+                          { id: 'attendance', label: 'Presensi Siswa' },
+                          { id: 'teachers', label: 'Master Guru' },
+                          { id: 'teacher_attendance', label: 'Presensi Guru' },
+                          { id: 'app_users', label: 'Pengguna / Akun' },
+                          { id: 'school_settings', label: 'Pengaturan Sekolah' },
+                          { id: 'problematic_student_dispatches', label: 'Disposisi Siswa' },
+                          { id: 'activity_logs', label: 'Log Audit' },
+                        ].map((t) => {
+                          const isMissing = supabaseTestStatus.missingTables?.includes(t.id);
+                          const isFound = supabaseTestStatus.tablesFound?.includes(t.id);
+                          return (
+                            <div
+                              key={t.id}
+                              className={`px-2 py-1.5 rounded-lg border text-[11px] flex items-center justify-between font-medium ${
+                                isFound
+                                  ? 'bg-emerald-100/70 dark:bg-emerald-900/40 border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-200'
+                                  : isMissing
+                                  ? 'bg-rose-100/70 dark:bg-rose-900/40 border-rose-300 dark:border-rose-700 text-rose-800 dark:text-rose-200'
+                                  : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                              }`}
+                            >
+                              <span className="truncate pr-1">{t.label}</span>
+                              {isFound ? (
+                                <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-300">✓ Ada</span>
+                              ) : isMissing ? (
+                                <span className="text-[10px] font-bold text-rose-700 dark:text-rose-300">✗ Belum</span>
+                              ) : (
+                                <span className="text-[10px]">-</span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Jaminan Keamanan Data */}
+                      <div className="pt-1.5 border-t border-slate-200 dark:border-slate-800 flex items-start gap-1.5 text-[11px] text-slate-600 dark:text-slate-400">
+                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                        <span>
+                          <b>Jaminan Keamanan Data:</b> Migrasi menggunakan metode <i>UPSERT non-destruktif</i> berbasis ID unik. Data yang sudah ada di Supabase <b>tidak akan dihapus</b> atau ditimpa secara keliru, melainkan digabungkan (merge) secara aman.
+                        </span>
+                      </div>
+
+                      {supabaseTestStatus.missingTables && supabaseTestStatus.missingTables.length > 0 && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={handleCopySupabaseSchema}
+                            className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded text-[11px] font-bold cursor-pointer inline-flex items-center gap-1.5"
+                          >
+                            <Code2 className="w-3.5 h-3.5" />
+                            <span>Salin Skrip SQL untuk Buat Tabel yang Belum Ada</span>
+                          </button>
+                        </div>
                       )}
-                      <span className="leading-relaxed">{supabaseTestStatus.message}</span>
                     </div>
                   )}
 

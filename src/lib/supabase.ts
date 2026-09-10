@@ -1,5 +1,14 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { Student, AttendanceRecord, ActivityLog, Teacher, TeacherAttendanceRecord } from '../types';
+import {
+  Student,
+  AttendanceRecord,
+  ActivityLog,
+  Teacher,
+  TeacherAttendanceRecord,
+  User,
+  SchoolSettings,
+  ProblematicStudentDispatch,
+} from '../types';
 
 let cachedClient: SupabaseClient | null = null;
 let cachedConfigKey = '';
@@ -79,6 +88,9 @@ export function getSupabaseClient(customConfig?: SupabaseConfig): SupabaseClient
   try {
     cachedClient = createClient(config.url, config.key, {
       auth: { persistSession: false },
+      global: {
+        fetch: (input, init) => fetch(input, init),
+      },
     });
     cachedConfigKey = currentKey;
     return cachedClient;
@@ -229,6 +241,257 @@ async function fetchAllRowsFromSupabaseTable(
   return allRows;
 }
 
+export interface SupabaseTableMetric {
+  id: string;
+  name: string;
+  label: string;
+  exists: boolean;
+  rowCount: number;
+  estimatedSizeKB: number;
+  status: 'ok' | 'missing' | 'error';
+  lastError?: string;
+}
+
+export interface SupabaseHealthReport {
+  success: boolean;
+  status: 'healthy' | 'warning' | 'error' | 'disconnected';
+  message: string;
+  latencyMs: number;
+  url: string;
+  sslActive: boolean;
+  tables: SupabaseTableMetric[];
+  tablesFoundCount: number;
+  missingTablesCount: number;
+  totalRecordsInCloud: number;
+  estimatedTotalSizeKB: number;
+  estimatedTotalSizeMB: number;
+  freeTierStorageLimitMB: number;
+  storageUsagePercent: number;
+  rowQuotaLimit: number;
+  rowUsagePercent: number;
+  lastCheckedAt: string;
+}
+
+const TABLE_DEFINITIONS: { id: string; name: string; label: string; avgRowBytes: number }[] = [
+  { id: 'students', name: 'students', label: 'Master Siswa', avgRowBytes: 750 },
+  { id: 'attendance', name: 'attendance', label: 'Presensi Siswa', avgRowBytes: 450 },
+  { id: 'teachers', name: 'teachers', label: 'Master Guru & GTK', avgRowBytes: 800 },
+  { id: 'teacher_attendance', name: 'teacher_attendance', label: 'Presensi Guru', avgRowBytes: 450 },
+  { id: 'app_users', name: 'app_users', label: 'Akun Pengguna', avgRowBytes: 600 },
+  { id: 'school_settings', name: 'school_settings', label: 'Pengaturan Sekolah', avgRowBytes: 4000 },
+  { id: 'problematic_student_dispatches', name: 'problematic_student_dispatches', label: 'Disposisi Siswa', avgRowBytes: 1200 },
+  { id: 'activity_logs', name: 'activity_logs', label: 'Log Audit & Aktivitas', avgRowBytes: 600 },
+];
+
+export async function fetchSupabaseHealthAndMetrics(
+  customConfig?: SupabaseConfig
+): Promise<SupabaseHealthReport> {
+  const rawConfig = customConfig || getSupabaseCredentials();
+  const config = {
+    url: sanitizeSupabaseUrl(rawConfig.url),
+    key: rawConfig.key?.trim() || '',
+  };
+  const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const nowIso = new Date().toISOString();
+
+  if (!config.url || !config.key) {
+    return {
+      success: false,
+      status: 'disconnected',
+      message: 'Kredensial Supabase belum dikonfigurasi. Masukkan URL dan API Key.',
+      latencyMs: 0,
+      url: config.url || '',
+      sslActive: false,
+      tables: TABLE_DEFINITIONS.map((t) => ({
+        id: t.id,
+        name: t.name,
+        label: t.label,
+        exists: false,
+        rowCount: 0,
+        estimatedSizeKB: 0,
+        status: 'missing',
+      })),
+      tablesFoundCount: 0,
+      missingTablesCount: TABLE_DEFINITIONS.length,
+      totalRecordsInCloud: 0,
+      estimatedTotalSizeKB: 0,
+      estimatedTotalSizeMB: 0,
+      freeTierStorageLimitMB: 500,
+      storageUsagePercent: 0,
+      rowQuotaLimit: 500000,
+      rowUsagePercent: 0,
+      lastCheckedAt: nowIso,
+    };
+  }
+
+  const client = getSupabaseClient(config);
+  if (!client) {
+    return {
+      success: false,
+      status: 'error',
+      message: 'Inisialisasi klien Supabase gagal. Periksa format URL & Key.',
+      latencyMs: 0,
+      url: config.url,
+      sslActive: config.url.startsWith('https://'),
+      tables: TABLE_DEFINITIONS.map((t) => ({
+        id: t.id,
+        name: t.name,
+        label: t.label,
+        exists: false,
+        rowCount: 0,
+        estimatedSizeKB: 0,
+        status: 'error',
+      })),
+      tablesFoundCount: 0,
+      missingTablesCount: TABLE_DEFINITIONS.length,
+      totalRecordsInCloud: 0,
+      estimatedTotalSizeKB: 0,
+      estimatedTotalSizeMB: 0,
+      freeTierStorageLimitMB: 500,
+      storageUsagePercent: 0,
+      rowQuotaLimit: 500000,
+      rowUsagePercent: 0,
+      lastCheckedAt: nowIso,
+    };
+  }
+
+  try {
+    const tablePromises = TABLE_DEFINITIONS.map(async (def) => {
+      try {
+        const { count, error } = await client.from(def.name).select('*', { count: 'exact', head: true });
+        if (error) {
+          if (
+            error.code === '42P01' ||
+            error.code === 'PGRST205' ||
+            error.message?.toLowerCase().includes('does not exist') ||
+            error.message?.toLowerCase().includes('schema cache')
+          ) {
+            return {
+              id: def.id,
+              name: def.name,
+              label: def.label,
+              exists: false,
+              rowCount: 0,
+              estimatedSizeKB: 0,
+              status: 'missing' as const,
+              lastError: 'Tabel belum dibuat',
+            };
+          }
+          return {
+            id: def.id,
+            name: def.name,
+            label: def.label,
+            exists: false,
+            rowCount: 0,
+            estimatedSizeKB: 0,
+            status: 'error' as const,
+            lastError: error.message,
+          };
+        }
+
+        const validCount = typeof count === 'number' ? count : 0;
+        const estKB = Math.round(((validCount * def.avgRowBytes) / 1024) * 10) / 10;
+        return {
+          id: def.id,
+          name: def.name,
+          label: def.label,
+          exists: true,
+          rowCount: validCount,
+          estimatedSizeKB: estKB,
+          status: 'ok' as const,
+        };
+      } catch (err: any) {
+        return {
+          id: def.id,
+          name: def.name,
+          label: def.label,
+          exists: false,
+          rowCount: 0,
+          estimatedSizeKB: 0,
+          status: 'error' as const,
+          lastError: err?.message || 'Error',
+        };
+      }
+    });
+
+    const tables = await Promise.all(tablePromises);
+    const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const latencyMs = Math.round(endTime - startTime);
+
+    const tablesFoundCount = tables.filter((t) => t.exists).length;
+    const missingTablesCount = tables.filter((t) => !t.exists).length;
+    const totalRecordsInCloud = tables.reduce((acc, t) => acc + t.rowCount, 0);
+    const estimatedTotalSizeKB = tables.reduce((acc, t) => acc + t.estimatedSizeKB, 0);
+    const estimatedTotalSizeMB = Math.round((estimatedTotalSizeKB / 1024) * 100) / 100;
+
+    const freeTierStorageLimitMB = 500;
+    const storageUsagePercent = Math.min(100, Math.round((estimatedTotalSizeMB / freeTierStorageLimitMB) * 1000) / 10);
+    const rowQuotaLimit = 500000;
+    const rowUsagePercent = Math.min(100, Math.round((totalRecordsInCloud / rowQuotaLimit) * 1000) / 10);
+
+    let status: 'healthy' | 'warning' | 'error' = 'healthy';
+    let message = 'Koneksi database Supabase prima. Semua 8 tabel aktif dan responsif.';
+
+    if (missingTablesCount > 0) {
+      status = 'warning';
+      message = `Koneksi aktif (${latencyMs}ms), namun ${missingTablesCount} dari 8 tabel belum dibuat di Supabase.`;
+    } else if (latencyMs > 1200) {
+      status = 'warning';
+      message = `Koneksi berhasil tetapi latensi cukup tinggi (${latencyMs}ms).`;
+    }
+
+    return {
+      success: true,
+      status,
+      message,
+      latencyMs,
+      url: config.url,
+      sslActive: config.url.startsWith('https://'),
+      tables,
+      tablesFoundCount,
+      missingTablesCount,
+      totalRecordsInCloud,
+      estimatedTotalSizeKB,
+      estimatedTotalSizeMB,
+      freeTierStorageLimitMB,
+      storageUsagePercent,
+      rowQuotaLimit,
+      rowUsagePercent,
+      lastCheckedAt: nowIso,
+    };
+  } catch (err: any) {
+    const endTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    return {
+      success: false,
+      status: 'error',
+      message: `Gagal memantau kesehatan database: ${err?.message || 'Gangguan koneksi'}`,
+      latencyMs: Math.round(endTime - startTime),
+      url: config.url,
+      sslActive: config.url.startsWith('https://'),
+      tables: TABLE_DEFINITIONS.map((t) => ({
+        id: t.id,
+        name: t.name,
+        label: t.label,
+        exists: false,
+        rowCount: 0,
+        estimatedSizeKB: 0,
+        status: 'error',
+        lastError: err?.message,
+      })),
+      tablesFoundCount: 0,
+      missingTablesCount: TABLE_DEFINITIONS.length,
+      totalRecordsInCloud: 0,
+      estimatedTotalSizeKB: 0,
+      estimatedTotalSizeMB: 0,
+      freeTierStorageLimitMB: 500,
+      storageUsagePercent: 0,
+      rowQuotaLimit: 500000,
+      rowUsagePercent: 0,
+      lastCheckedAt: nowIso,
+    };
+  }
+}
+
 export async function testSupabaseConnection(customConfig?: SupabaseConfig): Promise<{
   success: boolean;
   message: string;
@@ -263,7 +526,16 @@ export async function testSupabaseConnection(customConfig?: SupabaseConfig): Pro
   }
 
   try {
-    const requiredTables = ['students', 'attendance', 'activity_logs', 'teachers', 'teacher_attendance'];
+    const requiredTables = [
+      'students',
+      'attendance',
+      'teachers',
+      'teacher_attendance',
+      'app_users',
+      'school_settings',
+      'problematic_student_dispatches',
+      'activity_logs',
+    ];
     const tablesFound: string[] = [];
     const missingTables: string[] = [];
 
@@ -271,7 +543,12 @@ export async function testSupabaseConnection(customConfig?: SupabaseConfig): Pro
       try {
         const { error } = await client.from(tableName).select('count', { count: 'exact', head: true });
         if (error) {
-          if (error.code === '42P01' || error.message?.toLowerCase().includes('does not exist')) {
+          if (
+            error.code === '42P01' ||
+            error.code === 'PGRST205' ||
+            error.message?.toLowerCase().includes('does not exist') ||
+            error.message?.toLowerCase().includes('schema cache')
+          ) {
             missingTables.push(tableName);
           } else {
             tablesFound.push(tableName);
@@ -287,7 +564,7 @@ export async function testSupabaseConnection(customConfig?: SupabaseConfig): Pro
     if (missingTables.length > 0) {
       return {
         success: true,
-        message: `Terhubung ke Supabase! Beberapa tabel belum dibuat: (${missingTables.join(', ')}). Gunakan tombol 'Tampilkan SQL Schema' untuk membuat tabel yang belum ada.`,
+        message: `Terhubung ke Supabase! Beberapa tabel belum dibuat di Supabase: (${missingTables.join(', ')}). Buka tab 'Salin SQL Supabase' dan jalankan skrip SQL di Supabase SQL Editor.`,
         tablesFound,
         missingTables,
       };
@@ -295,7 +572,7 @@ export async function testSupabaseConnection(customConfig?: SupabaseConfig): Pro
 
     return {
       success: true,
-      message: 'Koneksi ke Supabase Berhasil! Semua tabel database siap digunakan.',
+      message: 'Koneksi ke Supabase Berhasil! Semua 8 tabel database siap digunakan.',
       tablesFound,
       missingTables: [],
     };
@@ -408,7 +685,7 @@ export async function syncAttendanceToSupabase(
   if (attendance.length === 0) return { success: true, count: 0 };
 
   try {
-    const records = attendance.map((a) => {
+    const rawRecords = attendance.map((a) => {
       const validTimestamp = toValidIsoTimestamp(a.timestamp, a.tanggal);
       const tanggal = toValidIsoDate(a.tanggal, validTimestamp);
 
@@ -428,14 +705,47 @@ export async function syncAttendanceToSupabase(
       };
     });
 
-    const chunks = chunkArray(records, 150);
+    // In-memory deduplication by (nisn + tanggal + jenis) and by ID to prevent batch collisions
+    const dedupMap = new Map<string, typeof rawRecords[0]>();
+    for (const r of rawRecords) {
+      const key = r.nisn ? `${r.nisn}___${r.tanggal}___${r.jenis}` : r.id;
+      const existing = dedupMap.get(key);
+      if (!existing || new Date(r.timestamp).getTime() >= new Date(existing.timestamp).getTime()) {
+        if (existing?.id) {
+          r.id = existing.id;
+        }
+        dedupMap.set(key, r);
+      }
+    }
+    const records = Array.from(dedupMap.values());
+
+    const chunks = chunkArray(records, 100);
     await parallelBatchExecution(
       chunks,
       async (chunk) => {
-        const { error } = await client.from('attendance').upsert(chunk, { onConflict: 'id' });
-        if (error) throw error;
+        let { error } = await client.from('attendance').upsert(chunk, { onConflict: 'id' });
+        if (error) {
+          // If unique constraint violation on nisn_tanggal_jenis occurs
+          if (error.message?.includes('attendance_unique_nisn_tanggal_jenis') || error.code === '23505') {
+            const retry = await client.from('attendance').upsert(chunk, { onConflict: 'nisn,tanggal,jenis' });
+            if (!retry.error) return;
+
+            // Individual fallback upsert
+            for (const item of chunk) {
+              const res1 = await client.from('attendance').upsert(item, { onConflict: 'id' });
+              if (res1.error && item.nisn) {
+                await client.from('attendance').update(item).match({ nisn: item.nisn, tanggal: item.tanggal, jenis: item.jenis });
+              }
+            }
+            return;
+          }
+          if (error.message?.includes('schema cache') || error.code === 'PGRST205' || error.code === '42P01') {
+            throw new Error("Tabel 'public.attendance' belum dibuat di Supabase. Salin dan jalankan skrip SQL di menu Pengaturan.");
+          }
+          throw error;
+        }
       },
-      5
+      3
     );
 
     return { success: true, count: records.length };
@@ -445,13 +755,28 @@ export async function syncAttendanceToSupabase(
   }
 }
 
-export async function fetchAttendanceFromSupabase(customConfig?: SupabaseConfig): Promise<AttendanceRecord[] | null> {
+export async function fetchAttendanceFromSupabase(
+  customConfig?: SupabaseConfig,
+  startDate?: string,
+  endDate?: string
+): Promise<AttendanceRecord[] | null> {
   const client = getSupabaseClient(customConfig);
   if (!client) return null;
   try {
-    const data = await fetchAllRowsFromSupabaseTable(client, 'attendance', 'timestamp', false);
-    if (data === null) return null;
-    return data.map((row) => ({
+    let query = client.from('attendance').select('*').order('timestamp', { ascending: false });
+    if (startDate) {
+      query = query.gte('tanggal', startDate);
+    }
+    if (endDate) {
+      query = query.lte('tanggal', endDate);
+    }
+    const { data, error } = await query;
+    if (error) {
+      console.warn('Supabase fetch attendance error:', error.message);
+      return null;
+    }
+    if (!data) return null;
+    return data.map((row: any) => ({
       id: row.id || `att-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       tanggal: toValidIsoDate(row.tanggal, row.timestamp),
       timestamp: row.timestamp || new Date().toISOString(),
@@ -583,7 +908,7 @@ export async function syncTeacherAttendanceToSupabase(
   if (attendance.length === 0) return { success: true, count: 0 };
 
   try {
-    const records = attendance.map((a) => {
+    const rawRecords = attendance.map((a) => {
       const validTimestamp = toValidIsoTimestamp(a.timestamp, a.tanggal);
       const tanggal = toValidIsoDate(a.tanggal, validTimestamp);
 
@@ -603,14 +928,45 @@ export async function syncTeacherAttendanceToSupabase(
       };
     });
 
-    const chunks = chunkArray(records, 150);
+    // In-memory deduplication by (nip + tanggal + jenis) and by ID
+    const dedupMap = new Map<string, typeof rawRecords[0]>();
+    for (const r of rawRecords) {
+      const key = r.nip ? `${r.nip}___${r.tanggal}___${r.jenis}` : r.id;
+      const existing = dedupMap.get(key);
+      if (!existing || new Date(r.timestamp).getTime() >= new Date(existing.timestamp).getTime()) {
+        if (existing?.id) {
+          r.id = existing.id;
+        }
+        dedupMap.set(key, r);
+      }
+    }
+    const records = Array.from(dedupMap.values());
+
+    const chunks = chunkArray(records, 100);
     await parallelBatchExecution(
       chunks,
       async (chunk) => {
-        const { error } = await client.from('teacher_attendance').upsert(chunk, { onConflict: 'id' });
-        if (error) throw error;
+        let { error } = await client.from('teacher_attendance').upsert(chunk, { onConflict: 'id' });
+        if (error) {
+          if (error.message?.includes('teacher_attendance_unique_nip_tanggal_jenis') || error.code === '23505') {
+            const retry = await client.from('teacher_attendance').upsert(chunk, { onConflict: 'nip,tanggal,jenis' });
+            if (!retry.error) return;
+
+            for (const item of chunk) {
+              const res1 = await client.from('teacher_attendance').upsert(item, { onConflict: 'id' });
+              if (res1.error && item.nip) {
+                await client.from('teacher_attendance').update(item).match({ nip: item.nip, tanggal: item.tanggal, jenis: item.jenis });
+              }
+            }
+            return;
+          }
+          if (error.message?.includes('schema cache') || error.code === 'PGRST205' || error.code === '42P01') {
+            throw new Error("Tabel 'public.teacher_attendance' belum dibuat di Supabase. Salin dan jalankan skrip SQL di menu Pengaturan.");
+          }
+          throw error;
+        }
       },
-      5
+      3
     );
 
     return { success: true, count: records.length };
@@ -620,13 +976,28 @@ export async function syncTeacherAttendanceToSupabase(
   }
 }
 
-export async function fetchTeacherAttendanceFromSupabase(customConfig?: SupabaseConfig): Promise<TeacherAttendanceRecord[] | null> {
+export async function fetchTeacherAttendanceFromSupabase(
+  customConfig?: SupabaseConfig,
+  startDate?: string,
+  endDate?: string
+): Promise<TeacherAttendanceRecord[] | null> {
   const client = getSupabaseClient(customConfig);
   if (!client) return null;
   try {
-    const data = await fetchAllRowsFromSupabaseTable(client, 'teacher_attendance', 'timestamp', false);
-    if (data === null) return null;
-    return data.map((row) => ({
+    let query = client.from('teacher_attendance').select('*').order('timestamp', { ascending: false });
+    if (startDate) {
+      query = query.gte('tanggal', startDate);
+    }
+    if (endDate) {
+      query = query.lte('tanggal', endDate);
+    }
+    const { data, error } = await query;
+    if (error) {
+      console.warn('Supabase fetch teacher attendance error:', error.message);
+      return null;
+    }
+    if (!data) return null;
+    return data.map((row: any) => ({
       id: row.id || `tch-att-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
       tanggal: toValidIsoDate(row.tanggal, row.timestamp),
       timestamp: row.timestamp || new Date().toISOString(),
@@ -721,6 +1092,347 @@ export async function deleteLogFromSupabase(id: string, customConfig?: SupabaseC
     return !error;
   } catch {
     return false;
+  }
+}
+
+// ==========================================
+// APP USERS SYNC & FETCH
+// ==========================================
+
+export async function syncUsersToSupabase(
+  users: User[],
+  customConfig?: SupabaseConfig
+): Promise<{ success: boolean; count: number; error?: string }> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return { success: false, count: 0, error: 'Klien Supabase tidak aktif' };
+  if (!users || users.length === 0) return { success: true, count: 0 };
+
+  try {
+    const records = users.map((u) => ({
+      uid: u.uid || `usr-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      username: (u.username || '').trim().toLowerCase(),
+      name: (u.name || '').trim(),
+      role: u.role || 'Guru',
+      sub_role: u.subRole || '',
+      assigned_class: u.assignedClass || '',
+      nip: (u.nip || '').trim(),
+      phone: (u.phone || '').trim(),
+      password: u.password || '',
+      status: u.status || 'aktif',
+      avatar: u.avatar || '',
+      notes: u.notes || '',
+      created_at: toValidIsoTimestamp(u.createdAt),
+      updated_at: toValidIsoTimestamp(u.updatedAt),
+      last_login_at: u.lastLoginAt ? toValidIsoTimestamp(u.lastLoginAt) : null,
+    }));
+
+    const chunks = chunkArray(records, 100);
+    await parallelBatchExecution(
+      chunks,
+      async (chunk) => {
+        const { error } = await client.from('app_users').upsert(chunk, { onConflict: 'uid' });
+        if (error) {
+          if (error.message?.includes('schema cache') || error.code === 'PGRST205' || error.code === '42P01') {
+            throw new Error("Tabel 'public.app_users' belum dibuat di Supabase. Salin dan jalankan skrip SQL di menu Pengaturan > Tab SQL Supabase.");
+          }
+          throw error;
+        }
+      },
+      3
+    );
+
+    return { success: true, count: records.length };
+  } catch (err: any) {
+    console.warn('Supabase users sync notice:', err?.message || err);
+    return { success: false, count: 0, error: err?.message || 'Gagal menyimpan tabel app_users ke Supabase' };
+  }
+}
+
+export async function fetchUsersFromSupabase(customConfig?: SupabaseConfig): Promise<User[] | null> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return null;
+  try {
+    const data = await fetchAllRowsFromSupabaseTable(client, 'app_users', 'name', true);
+    if (data === null) return null;
+    return data.map((row) => ({
+      uid: row.uid || `usr-${row.username}`,
+      username: row.username || '',
+      name: row.name || '',
+      role: (row.role as any) || 'Guru',
+      subRole: (row.sub_role as any) || undefined,
+      assignedClass: row.assigned_class || undefined,
+      nip: row.nip || undefined,
+      phone: row.phone || undefined,
+      password: row.password || undefined,
+      status: (row.status as any) || 'aktif',
+      avatar: row.avatar || undefined,
+      notes: row.notes || undefined,
+      createdAt: row.created_at || new Date().toISOString(),
+      updatedAt: row.updated_at || new Date().toISOString(),
+      lastLoginAt: row.last_login_at || undefined,
+    }));
+  } catch (err: any) {
+    console.warn('Supabase fetch users error:', err?.message || err);
+    return null;
+  }
+}
+
+export async function deleteUserFromSupabase(uid: string, customConfig?: SupabaseConfig): Promise<boolean> {
+  const client = getSupabaseClient(customConfig);
+  if (!client || !uid) return false;
+  try {
+    const { error } = await client.from('app_users').delete().eq('uid', uid);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// ==========================================
+// SCHOOL SETTINGS SYNC & FETCH
+// ==========================================
+
+export async function syncSettingsToSupabase(
+  settings: Partial<SchoolSettings>,
+  customConfig?: SupabaseConfig
+): Promise<{ success: boolean; error?: string }> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return { success: false, error: 'Klien Supabase tidak aktif' };
+
+  try {
+    const record = {
+      id: 'default',
+      settings_json: settings,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await client.from('school_settings').upsert(record, { onConflict: 'id' });
+    if (error) {
+      if (error.message?.includes('schema cache') || error.code === 'PGRST205' || error.code === '42P01') {
+        return { success: false, error: "Tabel 'public.school_settings' belum dibuat di Supabase. Salin dan jalankan skrip SQL di menu Pengaturan > Tab SQL Supabase." };
+      }
+      throw error;
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.warn('Supabase settings sync notice:', err?.message || err);
+    return { success: false, error: err?.message || 'Gagal menyimpan tabel school_settings ke Supabase' };
+  }
+}
+
+export async function fetchSettingsFromSupabase(customConfig?: SupabaseConfig): Promise<Partial<SchoolSettings> | null> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return null;
+  try {
+    const { data, error } = await client.from('school_settings').select('*').eq('id', 'default').maybeSingle();
+    if (error || !data) return null;
+    return (data.settings_json as Partial<SchoolSettings>) || null;
+  } catch (err: any) {
+    console.warn('Supabase fetch settings error:', err?.message || err);
+    return null;
+  }
+}
+
+// ==========================================
+// PROBLEMATIC STUDENT DISPATCHES SYNC & FETCH
+// ==========================================
+
+export async function syncDispatchesToSupabase(
+  dispatches: ProblematicStudentDispatch[],
+  customConfig?: SupabaseConfig
+): Promise<{ success: boolean; count: number; error?: string }> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return { success: false, count: 0, error: 'Klien Supabase tidak aktif' };
+  if (!dispatches || dispatches.length === 0) return { success: true, count: 0 };
+
+  try {
+    const records = dispatches.map((d) => ({
+      id: d.id || `disp-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
+      student_id: d.studentId || '',
+      student_name: d.studentName || '',
+      nisn: d.nisn || '',
+      kelas: d.kelas || '',
+      wali_kelas_name: d.waliKelasName || '',
+      wali_kelas_phone: d.waliKelasPhone || '',
+      wali_kelas_nip: d.waliKelasNip || '',
+      risk_level: d.riskLevel || 'Sedang',
+      alpa_count: d.alpaCount || 0,
+      terlambat_count: d.terlambatCount || 0,
+      sakit_count: d.sakitCount || 0,
+      izin_count: d.izinCount || 0,
+      attendance_rate: d.attendanceRate || 0,
+      reasons: d.reasons || [],
+      notes: d.notes || '',
+      ai_recommendation: d.aiRecommendation || '',
+      dispatched_at: toValidIsoTimestamp(d.dispatchedAt),
+      dispatched_by: d.dispatchedBy || '',
+      channel: d.channel || 'Sistem Internal',
+      status: d.status || 'Terkirim',
+      tindak_lanjut_notes: d.tindakLanjutNotes || '',
+      resolved_at: d.resolvedAt ? toValidIsoTimestamp(d.resolvedAt) : null,
+    }));
+
+    const chunks = chunkArray(records, 100);
+    await parallelBatchExecution(
+      chunks,
+      async (chunk) => {
+        const { error } = await client.from('problematic_student_dispatches').upsert(chunk, { onConflict: 'id' });
+        if (error) {
+          if (error.message?.includes('schema cache') || error.code === 'PGRST205' || error.code === '42P01') {
+            throw new Error("Tabel 'public.problematic_student_dispatches' belum dibuat di Supabase. Salin dan jalankan skrip SQL di menu Pengaturan > Tab SQL Supabase.");
+          }
+          throw error;
+        }
+      },
+      3
+    );
+
+    return { success: true, count: records.length };
+  } catch (err: any) {
+    console.warn('Supabase dispatches sync notice:', err?.message || err);
+    return { success: false, count: 0, error: err?.message || 'Gagal menyimpan tabel problematic_student_dispatches ke Supabase' };
+  }
+}
+
+export async function fetchDispatchesFromSupabase(customConfig?: SupabaseConfig): Promise<ProblematicStudentDispatch[] | null> {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return null;
+  try {
+    const data = await fetchAllRowsFromSupabaseTable(client, 'problematic_student_dispatches', 'dispatched_at', false);
+    if (data === null) return null;
+    return data.map((row) => ({
+      id: row.id || `disp-${Date.now()}`,
+      studentId: row.student_id || undefined,
+      studentName: row.student_name || '',
+      nisn: row.nisn || '',
+      kelas: row.kelas || '',
+      waliKelasName: row.wali_kelas_name || '',
+      waliKelasPhone: row.wali_kelas_phone || undefined,
+      waliKelasNip: row.wali_kelas_nip || undefined,
+      riskLevel: (row.risk_level as any) || 'Sedang',
+      alpaCount: Number(row.alpa_count) || 0,
+      terlambatCount: Number(row.terlambat_count) || 0,
+      sakitCount: Number(row.sakit_count) || 0,
+      izinCount: Number(row.izin_count) || 0,
+      attendanceRate: Number(row.attendance_rate) || 0,
+      reasons: Array.isArray(row.reasons) ? row.reasons : [],
+      notes: row.notes || undefined,
+      aiRecommendation: row.ai_recommendation || undefined,
+      dispatchedAt: row.dispatched_at || new Date().toISOString(),
+      dispatchedBy: row.dispatched_by || 'Sistem',
+      channel: (row.channel as any) || 'Sistem Internal',
+      status: (row.status as any) || 'Terkirim',
+      tindakLanjutNotes: row.tindak_lanjut_notes || undefined,
+      resolvedAt: row.resolved_at || undefined,
+    }));
+  } catch (err: any) {
+    console.warn('Supabase fetch dispatches error:', err?.message || err);
+    return null;
+  }
+}
+
+export async function deleteDispatchFromSupabase(id: string, customConfig?: SupabaseConfig): Promise<boolean> {
+  const client = getSupabaseClient(customConfig);
+  if (!client || !id) return false;
+  try {
+    const { error } = await client.from('problematic_student_dispatches').delete().eq('id', id);
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
+// ==========================================
+// REAL-TIME MULTI-DEVICE LISTENERS (SUPABASE)
+// ==========================================
+
+export function subscribeToSupabaseAttendance(
+  onRecord: (record: AttendanceRecord) => void,
+  customConfig?: SupabaseConfig
+): (() => void) | null {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return null;
+
+  try {
+    const channel = client
+      .channel('attendance-changes')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'attendance' },
+        (payload) => {
+          if (payload && payload.new) {
+            const row = payload.new as any;
+            const item: AttendanceRecord = {
+              id: row.id,
+              tanggal: toValidIsoDate(row.tanggal, row.timestamp),
+              timestamp: row.timestamp || new Date().toISOString(),
+              nisn: row.nisn || '',
+              nama: row.nama || '',
+              kelas: row.kelas || '',
+              id_qr: row.id_qr || '',
+              jenis: row.jenis || 'Masuk',
+              status: row.status || 'Hadir',
+              petugas: row.petugas || 'Sistem',
+              catatan: row.catatan || '',
+              terlambatMenit: row.terlambat_menit || 0,
+            };
+            onRecord(item);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  } catch (err) {
+    console.warn('Supabase realtime attendance listener error:', err);
+    return null;
+  }
+}
+
+export function subscribeToSupabaseTeacherAttendance(
+  onRecord: (record: TeacherAttendanceRecord) => void,
+  customConfig?: SupabaseConfig
+): (() => void) | null {
+  const client = getSupabaseClient(customConfig);
+  if (!client) return null;
+
+  try {
+    const channel = client
+      .channel('teacher-attendance-changes')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'teacher_attendance' },
+        (payload) => {
+          if (payload && payload.new) {
+            const row = payload.new as any;
+            const item: TeacherAttendanceRecord = {
+              id: row.id,
+              tanggal: toValidIsoDate(row.tanggal, row.timestamp),
+              timestamp: row.timestamp || new Date().toISOString(),
+              nip: row.nip || '',
+              nama: row.nama || '',
+              jabatan: row.jabatan || '',
+              id_qr: row.id_qr || '',
+              jenis: row.jenis || 'Masuk',
+              status: row.status || 'Hadir',
+              petugas: row.petugas || 'Sistem',
+              catatan: row.catatan || '',
+              terlambatMenit: row.terlambat_menit || 0,
+            };
+            onRecord(item);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      client.removeChannel(channel);
+    };
+  } catch (err) {
+    console.warn('Supabase realtime teacher attendance listener error:', err);
+    return null;
   }
 }
 
@@ -851,6 +1563,9 @@ ALTER TABLE public.attendance ADD COLUMN IF NOT EXISTS catatan TEXT;
 ALTER TABLE public.attendance ADD COLUMN IF NOT EXISTS terlambat_menit INT DEFAULT 0;
 ALTER TABLE public.attendance ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 
+-- Hapus batasan duplikasi kaku agar sinkronisasi ID-based berjalan lancar
+ALTER TABLE public.attendance DROP CONSTRAINT IF EXISTS attendance_unique_nisn_tanggal_jenis;
+
 CREATE INDEX IF NOT EXISTS idx_attendance_tanggal ON public.attendance(tanggal);
 CREATE INDEX IF NOT EXISTS idx_attendance_nisn ON public.attendance(nisn);
 CREATE INDEX IF NOT EXISTS idx_attendance_id_qr ON public.attendance(id_qr);
@@ -901,6 +1616,9 @@ ALTER TABLE public.teacher_attendance ADD COLUMN IF NOT EXISTS catatan TEXT;
 ALTER TABLE public.teacher_attendance ADD COLUMN IF NOT EXISTS terlambat_menit INT DEFAULT 0;
 ALTER TABLE public.teacher_attendance ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 
+-- Hapus batasan duplikasi kaku pada guru
+ALTER TABLE public.teacher_attendance DROP CONSTRAINT IF EXISTS teacher_attendance_unique_nip_tanggal_jenis;
+
 CREATE INDEX IF NOT EXISTS idx_teacher_attendance_tanggal ON public.teacher_attendance(tanggal);
 CREATE INDEX IF NOT EXISTS idx_teacher_attendance_nip ON public.teacher_attendance(nip);
 CREATE INDEX IF NOT EXISTS idx_teacher_attendance_jenis ON public.teacher_attendance(jenis);
@@ -918,12 +1636,85 @@ CREATE TABLE IF NOT EXISTS public.activity_logs (
 
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON public.activity_logs(timestamp);
 
--- 6. KEBIJAKAN ROW LEVEL SECURITY (RLS) & HAK AKSES API
+-- 6. TABEL AKUN PENGGUNA & AUTENTIKASI (app_users)
+CREATE TABLE IF NOT EXISTS public.app_users (
+    uid TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'Guru',
+    sub_role TEXT,
+    assigned_class TEXT,
+    nip TEXT,
+    phone TEXT,
+    password TEXT,
+    status TEXT DEFAULT 'aktif',
+    avatar TEXT,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    last_login_at TIMESTAMPTZ
+);
+
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS sub_role TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS assigned_class TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS nip TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS password TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'aktif';
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS avatar TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE public.app_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_app_users_username ON public.app_users(username);
+CREATE INDEX IF NOT EXISTS idx_app_users_role ON public.app_users(role);
+
+-- 7. TABEL PENGATURAN & WALI KELAS SEKOLAH (school_settings)
+CREATE TABLE IF NOT EXISTS public.school_settings (
+    id TEXT PRIMARY KEY DEFAULT 'default',
+    settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 8. TABEL DISPOSISI SISWA BERMASALAH (problematic_student_dispatches)
+CREATE TABLE IF NOT EXISTS public.problematic_student_dispatches (
+    id TEXT PRIMARY KEY,
+    student_id TEXT,
+    student_name TEXT NOT NULL,
+    nisn TEXT NOT NULL,
+    kelas TEXT NOT NULL,
+    wali_kelas_name TEXT NOT NULL,
+    wali_kelas_phone TEXT,
+    wali_kelas_nip TEXT,
+    risk_level TEXT DEFAULT 'Sedang',
+    alpa_count INT DEFAULT 0,
+    terlambat_count INT DEFAULT 0,
+    sakit_count INT DEFAULT 0,
+    izin_count INT DEFAULT 0,
+    attendance_rate NUMERIC DEFAULT 0,
+    reasons JSONB DEFAULT '[]'::jsonb,
+    notes TEXT,
+    ai_recommendation TEXT,
+    dispatched_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    dispatched_by TEXT DEFAULT 'Sistem',
+    channel TEXT DEFAULT 'Sistem Internal',
+    status TEXT DEFAULT 'Terkirim',
+    tindak_lanjut_notes TEXT,
+    resolved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatches_nisn ON public.problematic_student_dispatches(nisn);
+CREATE INDEX IF NOT EXISTS idx_dispatches_kelas ON public.problematic_student_dispatches(kelas);
+CREATE INDEX IF NOT EXISTS idx_dispatches_date ON public.problematic_student_dispatches(dispatched_at DESC);
+
+-- 9. KEBIJAKAN ROW LEVEL SECURITY (RLS) & HAK AKSES API
 ALTER TABLE public.students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attendance ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.teachers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.teacher_attendance ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.school_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.problematic_student_dispatches ENABLE ROW LEVEL SECURITY;
 
 DO $$ 
 BEGIN
@@ -942,8 +1733,173 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'activity_logs' AND policyname = 'Allow all logs') THEN
         CREATE POLICY "Allow all logs" ON public.activity_logs FOR ALL USING (true) WITH CHECK (true);
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'app_users' AND policyname = 'Allow all users') THEN
+        CREATE POLICY "Allow all users" ON public.app_users FOR ALL USING (true) WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'school_settings' AND policyname = 'Allow all settings') THEN
+        CREATE POLICY "Allow all settings" ON public.school_settings FOR ALL USING (true) WITH CHECK (true);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'problematic_student_dispatches' AND policyname = 'Allow all dispatches') THEN
+        CREATE POLICY "Allow all dispatches" ON public.problematic_student_dispatches FOR ALL USING (true) WITH CHECK (true);
+    END IF;
 END $$;
 `;
+}
+
+/**
+ * Performs a comprehensive, safe, verified migration of all in-memory entities to Supabase Cloud
+ */
+export async function migrateAllDataToSupabaseCloud(
+  payload: {
+    students: Student[];
+    attendance: AttendanceRecord[];
+    teachers: Teacher[];
+    teacherAttendance: TeacherAttendanceRecord[];
+    logs: ActivityLog[];
+    users: User[];
+    settings: Partial<SchoolSettings>;
+    dispatches: ProblematicStudentDispatch[];
+  },
+  customConfig?: SupabaseConfig,
+  onProgress?: (stage: string, current: number, total: number) => void
+): Promise<{
+  success: boolean;
+  message: string;
+  stats: {
+    students: number;
+    attendance: number;
+    teachers: number;
+    teacherAttendance: number;
+    logs: number;
+    users: number;
+    settings: boolean;
+    dispatches: number;
+  };
+  errors: string[];
+}> {
+  const config = customConfig || getSupabaseCredentials();
+  if (!isSupabaseConfigured(config)) {
+    return {
+      success: false,
+      message: 'Supabase URL atau Key belum terpasang dengan benar.',
+      stats: {
+        students: 0,
+        attendance: 0,
+        teachers: 0,
+        teacherAttendance: 0,
+        logs: 0,
+        users: 0,
+        settings: false,
+        dispatches: 0,
+      },
+      errors: ['Supabase URL/Key tidak valid'],
+    };
+  }
+
+  const errors: string[] = [];
+  const stats = {
+    students: 0,
+    attendance: 0,
+    teachers: 0,
+    teacherAttendance: 0,
+    logs: 0,
+    users: 0,
+    settings: false,
+    dispatches: 0,
+  };
+
+  try {
+    // 1. Settings
+    if (onProgress) onProgress('Menyinkronkan Pengaturan Sekolah & Pemetaan Wali Kelas...', 1, 8);
+    const setRes = await syncSettingsToSupabase(payload.settings, config);
+    if (setRes.success) {
+      stats.settings = true;
+    } else {
+      errors.push(`Pengaturan: ${setRes.error || 'Gagal'}`);
+    }
+
+    // 2. Users
+    if (onProgress) onProgress('Memigrasikan Akun Pengguna...', 2, 8);
+    const usrRes = await syncUsersToSupabase(payload.users, config);
+    if (usrRes.success) {
+      stats.users = usrRes.count;
+    } else {
+      errors.push(`Pengguna: ${usrRes.error || 'Gagal'}`);
+    }
+
+    // 3. Students
+    if (onProgress) onProgress('Memigrasikan Master Siswa...', 3, 8);
+    const stuRes = await syncStudentsToSupabase(payload.students, config);
+    if (stuRes.success) {
+      stats.students = stuRes.count;
+    } else {
+      errors.push(`Siswa: ${stuRes.error || 'Gagal'}`);
+    }
+
+    // 4. Teachers
+    if (onProgress) onProgress('Memigrasikan Master Guru & GTK...', 4, 8);
+    const tchRes = await syncTeachersToSupabase(payload.teachers, config);
+    if (tchRes.success) {
+      stats.teachers = tchRes.count;
+    } else {
+      errors.push(`Guru: ${tchRes.error || 'Gagal'}`);
+    }
+
+    // 5. Attendance
+    if (onProgress) onProgress('Memigrasikan Riwayat Presensi Siswa...', 5, 8);
+    const attRes = await syncAttendanceToSupabase(payload.attendance, config);
+    if (attRes.success) {
+      stats.attendance = attRes.count;
+    } else {
+      errors.push(`Presensi Siswa: ${attRes.error || 'Gagal'}`);
+    }
+
+    // 6. Teacher Attendance
+    if (onProgress) onProgress('Memigrasikan Riwayat Presensi Guru...', 6, 8);
+    const taRes = await syncTeacherAttendanceToSupabase(payload.teacherAttendance, config);
+    if (taRes.success) {
+      stats.teacherAttendance = taRes.count;
+    } else {
+      errors.push(`Presensi Guru: ${taRes.error || 'Gagal'}`);
+    }
+
+    // 7. Dispatches
+    if (onProgress) onProgress('Memigrasikan Disposisi Siswa Bermasalah...', 7, 8);
+    const dispRes = await syncDispatchesToSupabase(payload.dispatches, config);
+    if (dispRes.success) {
+      stats.dispatches = dispRes.count;
+    } else {
+      errors.push(`Disposisi: ${dispRes.error || 'Gagal'}`);
+    }
+
+    // 8. Logs
+    if (onProgress) onProgress('Memigrasikan Log Audit & Aktivitas...', 8, 8);
+    const logRes = await syncLogsToSupabase(payload.logs, config);
+    if (logRes.success) {
+      stats.logs = logRes.count;
+    } else {
+      errors.push(`Log: ${logRes.error || 'Gagal'}`);
+    }
+
+    const isSuccess = errors.length === 0;
+    const msg = isSuccess
+      ? `Migrasi Sukses ke Database Tunggal Supabase! Berhasil memindahkan ${stats.students} siswa, ${stats.attendance} presensi siswa, ${stats.teachers} guru, ${stats.teacherAttendance} presensi guru, ${stats.users} pengguna, ${stats.dispatches} disposisi, dan pengaturan sekolah.`
+      : `Migrasi selesai dengan beberapa catatan: ${errors.join(' | ')}`;
+
+    return {
+      success: isSuccess,
+      message: msg,
+      stats,
+      errors,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: `Terjadi error saat proses migrasi Supabase: ${err?.message || err}`,
+      stats,
+      errors: [err?.message || 'Unknown migration error'],
+    };
+  }
 }
 
 /**

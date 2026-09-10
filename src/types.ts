@@ -105,6 +105,7 @@ export interface SchoolSettings {
   schoolName: string;
   schoolNPSN: string;
   schoolLogo?: string; // Base64 data URL or image URL for custom school logo
+  provinsiLogo?: string; // Base64 data URL for custom provinsi logo
   schoolAddress?: string;
   schoolCity?: string;
   cutoffTime: string; // e.g. "07:15"

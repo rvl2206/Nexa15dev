@@ -458,11 +458,57 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     };
   }, []);
 
+  const isStudentActive = (s?: Student | { status?: string } | null): boolean => {
+    if (!s) return false;
+    const st = String(s.status || 'aktif').trim().toLowerCase();
+    return st !== 'nonaktif' && st !== 'tidak aktif' && st !== 'inactive';
+  };
+
+  // Lookup of inactive / disabled student identifiers (NISN and id_qr)
+  const inactiveStudentNisns = React.useMemo(() => {
+    const set = new Set<string>();
+    students.forEach((s) => {
+      if (!isStudentActive(s) && s.nisn) {
+        set.add(s.nisn.trim());
+      }
+    });
+    return set;
+  }, [students]);
+
+  const inactiveStudentQrIds = React.useMemo(() => {
+    const set = new Set<string>();
+    students.forEach((s) => {
+      if (!isStudentActive(s) && s.id_qr) {
+        set.add(s.id_qr.trim().toLowerCase());
+      }
+    });
+    return set;
+  }, [students]);
+
+  // Check whether an attendance record belongs to an inactive / nonaktif student
+  const isRecordForInactiveStudent = React.useCallback(
+    (r: AttendanceRecord): boolean => {
+      if (r.nisn && inactiveStudentNisns.has(r.nisn.trim())) return true;
+      if (r.id_qr && inactiveStudentQrIds.has(r.id_qr.trim().toLowerCase())) return true;
+      const matched = students.find(
+        (s) =>
+          (s.nisn && r.nisn && s.nisn.trim() === r.nisn.trim()) ||
+          (s.id_qr && r.id_qr && s.id_qr.trim().toLowerCase() === r.id_qr.trim().toLowerCase())
+      );
+      if (matched && !isStudentActive(matched)) return true;
+      return false;
+    },
+    [inactiveStudentNisns, inactiveStudentQrIds, students]
+  );
+
   const classOptions = React.useMemo(() => {
-    const fromStudents = students.map((s) => s.kelas.trim()).filter(Boolean);
-    const fromAttendance = attendance.map((a) => a.kelas.trim()).filter(Boolean);
+    const fromStudents = students.filter(isStudentActive).map((s) => s.kelas.trim()).filter(Boolean);
+    const fromAttendance = attendance
+      .filter((a) => !isRecordForInactiveStudent(a))
+      .map((a) => a.kelas.trim())
+      .filter(Boolean);
     return Array.from(new Set([...fromStudents, ...fromAttendance])).sort();
-  }, [students, attendance]);
+  }, [students, attendance, isRecordForInactiveStudent]);
 
   const isMatchKelas = (itemClass?: string, targetClass?: string) => {
     if (!targetClass || targetClass === 'Semua') return true;
@@ -526,6 +572,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
   const availableDatesWithData = React.useMemo(() => {
     const dates = new Set<string>();
     attendance.forEach((r) => {
+      if (isRecordForInactiveStudent(r)) return;
       const norm = normalizeToYyyyMmDd(r.tanggal);
       if (norm) dates.add(norm);
       if (r.timestamp) {
@@ -534,12 +581,13 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
       }
     });
     return Array.from(dates).sort().reverse();
-  }, [attendance]);
+  }, [attendance, isRecordForInactiveStudent]);
 
   // List of unique available months in attendance data (sorted descending)
   const availableMonthsWithData = React.useMemo(() => {
     const months = new Set<string>();
     attendance.forEach((r) => {
+      if (isRecordForInactiveStudent(r)) return;
       const norm = normalizeToYyyyMmDd(r.tanggal) || (r.timestamp ? normalizeToYyyyMmDd(r.timestamp) : '');
       if (norm && norm.length >= 7) {
         months.add(norm.slice(0, 7));
@@ -547,7 +595,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     });
     months.add(currentMonthISO);
     return Array.from(months).sort().reverse();
-  }, [attendance, currentMonthISO]);
+  }, [attendance, currentMonthISO, isRecordForInactiveStudent]);
 
   // Initial load check: if today has no records, select latest available date with data once
   const initialAutoSelectDone = useRef(false);
@@ -564,6 +612,9 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
   // Filtered Attendance List based on mode and active filters
   const filteredAttendance = React.useMemo(() => {
     return attendance.filter((r) => {
+      // Exclude attendance records belonging to inactive / nonaktif students
+      if (isRecordForInactiveStudent(r)) return false;
+
       // Nama / NISN / ID QR filter
       const matchNama =
         !filterNama ||
@@ -595,13 +646,14 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
 
       return matchNama && matchKelas && matchStatus && matchJenis && matchTime;
     });
-  }, [attendance, filterNama, filterKelas, filterStatus, filterJenis, recapMode, filterTanggal, filterBulan, semuaTanggalFilter]);
+  }, [attendance, filterNama, filterKelas, filterStatus, filterJenis, recapMode, filterTanggal, filterBulan, semuaTanggalFilter, isRecordForInactiveStudent]);
 
   // Calculate Monthly Summary per Student
   const monthlyStudentSummaries: StudentMonthlySummary[] = React.useMemo(() => {
     const cutoffTime = store.getSettings().cutoffTime || '07:15';
 
     const activeStudents = students.filter((s) => {
+      if (!isStudentActive(s)) return false;
       const matchKelas = isMatchKelas(s.kelas, filterKelas);
       const matchNama =
         !filterNama ||
@@ -610,7 +662,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
       return matchKelas && matchNama;
     });
 
-    const recordsInMonth = attendance.filter((r) => isMatchBulan(r, filterBulan));
+    const recordsInMonth = attendance.filter((r) => isMatchBulan(r, filterBulan) && !isRecordForInactiveStudent(r));
 
     // Get unique dates with active attendance in the selected month
     const uniqueActiveDates = Array.from(
@@ -696,7 +748,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
         tanpaAbsenMasuk,
       };
     });
-  }, [students, attendance, filterBulan, filterKelas, filterNama]);
+  }, [students, attendance, filterBulan, filterKelas, filterNama, isRecordForInactiveStudent]);
 
   // Calculate Raw Paired Daily Attendance (Waktu Masuk, Waktu Pulang, and Waktu Terlambat)
   const rawPairedDailyRecords = React.useMemo(() => {
@@ -704,6 +756,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     const cutoffTime = store.getSettings().cutoffTime || '07:15';
 
     const activeStudents = students.filter((s) => {
+      if (!isStudentActive(s)) return false;
       const matchKelas = isMatchKelas(s.kelas, filterKelas);
       const matchNama =
         !filterNama ||
@@ -712,7 +765,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
       return matchKelas && matchNama;
     });
 
-    const dayRecords = attendance.filter((r) => isMatchTanggal(r, filterTanggal));
+    const dayRecords = attendance.filter((r) => isMatchTanggal(r, filterTanggal) && !isRecordForInactiveStudent(r));
     const activeStudentNisns = new Set(activeStudents.map((s) => s.nisn).filter(Boolean));
 
     // 1. Process active registered students
@@ -755,6 +808,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     // 2. Also account for any attendance records on this date matching the class filter whose student isn't in activeStudents list
     const unlinkedRecords = dayRecords.filter((r) => {
       if (activeStudentNisns.has(r.nisn)) return false;
+      if (isRecordForInactiveStudent(r)) return false;
       const matchKelas = isMatchKelas(r.kelas, filterKelas);
       const matchNama =
         !filterNama ||
@@ -809,7 +863,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     });
 
     return paired;
-  }, [students, attendance, filterTanggal, filterKelas, filterNama, recapMode]);
+  }, [students, attendance, filterTanggal, filterKelas, filterNama, recapMode, isRecordForInactiveStudent]);
 
   // Quick summary count of paired records for tabs and badges
   const pairedSummaryCounts = React.useMemo(() => {
@@ -817,7 +871,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     const sudahPulang = rawPairedDailyRecords.filter((r) => Boolean(r.pulang)).length;
     const belumPulang = rawPairedDailyRecords.filter((r) => Boolean(r.masuk) && !r.pulang).length;
     const hadirMasuk = rawPairedDailyRecords.filter((r) => Boolean(r.masuk)).length;
-    const dayRecords = attendance.filter((r) => isMatchTanggal(r, filterTanggal));
+    const dayRecords = attendance.filter((r) => isMatchTanggal(r, filterTanggal) && !isRecordForInactiveStudent(r));
     const totalScans = dayRecords.filter((r) => {
       const matchKelas = isMatchKelas(r.kelas, filterKelas);
       const matchNama =
@@ -828,7 +882,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     }).length;
 
     return { total, sudahPulang, belumPulang, hadirMasuk, totalScans };
-  }, [rawPairedDailyRecords, attendance, filterTanggal, filterKelas, filterNama]);
+  }, [rawPairedDailyRecords, attendance, filterTanggal, filterKelas, filterNama, isRecordForInactiveStudent]);
 
   // Filtered Paired Daily Records for current table view
   const pairedDailyRecords = React.useMemo(() => {
@@ -850,6 +904,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     const cutoffTime = store.getSettings().cutoffTime || '07:15';
 
     const activeStudents = students.filter((s) => {
+      if (!isStudentActive(s)) return false;
       const matchKelas = filterKelas === 'Semua' || s.kelas === filterKelas;
       const matchNama =
         !filterNama ||
@@ -859,6 +914,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     });
 
     const targetRecords = attendance.filter((r) => {
+      if (isRecordForInactiveStudent(r)) return false;
       if (filterBulanDisiplin && filterBulanDisiplin !== 'Semua') {
         return isMatchBulan(r, filterBulanDisiplin);
       }
@@ -991,7 +1047,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     return items
       .filter((item) => item.lateCount > 0 || item.alpaCount > 0)
       .sort((a, b) => b.alpaCount - a.alpaCount || b.lateCount - a.lateCount || b.totalLateMinutes - a.totalLateMinutes);
-  }, [students, attendance, filterBulanDisiplin, filterKelas, filterNama]);
+  }, [students, attendance, filterBulanDisiplin, filterKelas, filterNama, isRecordForInactiveStudent]);
 
   const filteredDisciplineData = React.useMemo(() => {
     if (disciplineFilterType === 'hanya_terlambat') {
@@ -1425,6 +1481,9 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
                 filterBulanDisiplin === 'Semua' ? 'Semua Bulan (Akumulasi)' : formatIndoMonth(filterBulanDisiplin)
               }`}
             {recapMode === 'semua' && 'Menampilkan Seluruh Riwayat Absensi'}
+          </span>
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700/50">
+            Hanya Siswa Aktif
           </span>
         </div>
       </div>
@@ -2678,7 +2737,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
                   required
                 >
                   <option value="">-- Pilih Siswa --</option>
-                  {students.map((s) => (
+                  {students.filter(isStudentActive).map((s) => (
                     <option key={s.id} value={s.nisn}>
                       {s.nama} ({s.kelas}) - NISN: {s.nisn}
                     </option>
@@ -3003,8 +3062,9 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
                   onChange={(e) => {
                     if (e.target.value === 'kelas') {
                       setPrintStudentSlip(null);
-                    } else if (students.length > 0) {
-                      setPrintStudentSlip(students[0]);
+                    } else {
+                      const firstActive = students.find(isStudentActive);
+                      if (firstActive) setPrintStudentSlip(firstActive);
                     }
                   }}
                   className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-bold text-slate-900 dark:text-white"
@@ -3027,7 +3087,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
                     }}
                     className="w-full px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-bold text-slate-900 dark:text-white"
                   >
-                    {students.map((s) => (
+                    {students.filter(isStudentActive).map((s) => (
                       <option key={s.id} value={s.id}>
                         {s.nama} ({s.kelas})
                       </option>

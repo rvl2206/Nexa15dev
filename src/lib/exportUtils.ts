@@ -2,6 +2,7 @@ import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { AttendanceRecord, Student, Teacher, TeacherAttendanceRecord } from '../types';
+import { store } from './store';
 
 export function printElement(
   elementId: string,
@@ -1370,15 +1371,20 @@ export function drawOfficialKopSurat(doc: jsPDF, orientation: 'landscape' | 'por
   const marginX = isLandscape ? 14 : 12;
   const rightX = pageWidth - marginX;
 
-  const logoW = isLandscape ? 22 : 18;
-  const logoH = isLandscape ? 25 : 21;
+  const logoSize = isLandscape ? 24 : 20;
+  const logoW = logoSize;
+  const logoH = logoSize;
   const leftLogoX = marginX;
   const rightLogoX = rightX - logoW;
+  
+  const settings = store.getSettings();
+  const leftLogo = settings.provinsiLogo || malukuLogoPng;
+  const rightLogo = settings.schoolLogo || sman15LogoPng;
 
-  // Render Left Logo (Maluku Siwalima)
-  if (malukuLogoPng) {
+  // Render Left Logo (Maluku Siwalima / Custom)
+  if (leftLogo) {
     try {
-      doc.addImage(malukuLogoPng, 'PNG', leftLogoX, 4, logoW, logoH);
+      doc.addImage(leftLogo, leftLogoX, 4, logoW, logoH);
     } catch {
       // Fallback
     }
@@ -1397,10 +1403,10 @@ export function drawOfficialKopSurat(doc: jsPDF, orientation: 'landscape' | 'por
     doc.text('SIWALIMA', leftLogoX + logoW/2, 25.5, { align: 'center' });
   }
 
-  // Render Right Logo (SMA Negeri 15 Ambon)
-  if (sman15LogoPng) {
+  // Render Right Logo (SMA Negeri 15 Ambon / Custom)
+  if (rightLogo) {
     try {
-      doc.addImage(sman15LogoPng, 'PNG', rightLogoX, 4, logoW, logoH);
+      doc.addImage(rightLogo, rightLogoX, 4, logoW, logoH);
     } catch {
       // Fallback
     }

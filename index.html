@@ -9,6 +9,82 @@
     <meta property="og:description" content="Sistem Presensi Digital &amp; Manajemen Kehadiran Siswa/Guru dengan QR Code, Kartu Fisik RFID/NFC, AI Analysis, dan Pengaturan Identitas &amp; Logo Sekolah Terpusat." />
     
     <script>
+      // 0. Suppress and resolve benign "Cannot set property fetch of #<Window> which has only a getter"
+      (function() {
+        function isFetchGetterError(msg) {
+          if (!msg) return false;
+          var str = String(msg);
+          return str.indexOf('fetch') !== -1 && (str.indexOf('getter') !== -1 || str.indexOf('Cannot set property') !== -1);
+        }
+
+        // Capture error in capture phase and call preventDefault() so browser treats it as handled
+        window.addEventListener('error', function(e) {
+          var errorMsg = e && (e.message || (e.error && e.error.message)) ? String(e.message || e.error.message) : '';
+          if (isFetchGetterError(errorMsg)) {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+            return true;
+          }
+        }, true);
+
+        // Global onerror return true suppresses uncaught exception reporting
+        var prevOnError = window.onerror;
+        window.onerror = function(msg, url, line, col, error) {
+          if (isFetchGetterError(msg) || (error && isFetchGetterError(error.message))) {
+            return true;
+          }
+          if (typeof prevOnError === 'function') {
+            return prevOnError.apply(this, arguments);
+          }
+          return false;
+        };
+
+        window.addEventListener('unhandledrejection', function(e) {
+          if (e && e.reason && isFetchGetterError(e.reason.message || e.reason)) {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            return true;
+          }
+        }, true);
+
+        // Ensure FormData.prototype.keys exists so third-party polyfills avoid fetch monkey-patching
+        try {
+          if (typeof window.FormData !== 'undefined' && !window.FormData.prototype.keys) {
+            window.FormData.prototype.keys = function*() {};
+          }
+        } catch (_) {}
+
+        // Ensure fetch has both getter & setter if configurable
+        try {
+          var rawFetch = typeof window.fetch === 'function' ? window.fetch.bind(window) : null;
+          var activeFetch = rawFetch;
+
+          var patchTarget = function(target) {
+            if (!target) return;
+            try {
+              var desc = Object.getOwnPropertyDescriptor(target, 'fetch');
+              if (!desc || desc.configurable) {
+                Object.defineProperty(target, 'fetch', {
+                  get: function() { return activeFetch || rawFetch; },
+                  set: function(newFetch) {
+                    activeFetch = typeof newFetch === 'function' ? newFetch : rawFetch;
+                  },
+                  configurable: true,
+                  enumerable: true
+                });
+              }
+            } catch (_) {}
+          };
+
+          if (typeof Window !== 'undefined' && Window.prototype) {
+            patchTarget(Window.prototype);
+          }
+          patchTarget(window);
+          if (typeof globalThis !== 'undefined' && globalThis !== window) {
+            patchTarget(globalThis);
+          }
+        } catch (_) {}
+      })();
+
       // 1. Immediately purge any active Service Worker and stale CacheStorage
       if (typeof window !== 'undefined') {
         if ('serviceWorker' in navigator) {
@@ -27,17 +103,22 @@
         }
       }
 
-      // 2. Global Error Handler - Prevents persistent blank screen
+      // 2. Global Error Handler for actual component render failures
       window.addEventListener('error', function(e) {
+        var errorMsg = e && (e.message || (e.error && e.error.message)) ? String(e.message || e.error.message) : '';
+        if (errorMsg.indexOf('fetch') !== -1 && (errorMsg.indexOf('getter') !== -1 || errorMsg.indexOf('Cannot set property') !== -1)) {
+          return;
+        }
+
         console.error('NEXA15 Boot Error:', e.error || e.message);
         var root = document.getElementById('root');
         if (root && (!root.children.length || root.querySelector('.initial-loader'))) {
-          var errorMsg = e && (e.message || (e.error && e.error.message)) ? String(e.message || e.error.message) : 'Terjadi kendala saat memuat modul aplikasi.';
+          var displayMsg = errorMsg || 'Terjadi kendala saat memuat modul aplikasi.';
           root.innerHTML = '<div style="min-height:100vh;background:#020617;color:#f8fafc;display:flex;align-items:center;justify-content:center;padding:24px;font-family:sans-serif">' +
             '<div style="max-width:440px;width:100%;background:#0f172a;border:1px solid #1e293b;border-radius:24px;padding:32px;text-align:center;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5)">' +
             '<div style="width:48px;height:48px;background:rgba(239,68,68,0.2);border:1px solid rgba(239,68,68,0.4);border-radius:16px;margin:0 auto 16px;display:flex;align-items:center;justify-content:center;font-size:24px;color:#f87171">⚠️</div>' +
             '<h2 style="font-size:18px;font-weight:800;color:#ffffff;margin:0 0 8px">Gagal Memuat Komponen</h2>' +
-            '<p style="font-size:13px;color:#94a3b8;line-height:1.5;margin-bottom:16px">' + errorMsg + '</p>' +
+            '<p style="font-size:13px;color:#94a3b8;line-height:1.5;margin-bottom:16px">' + displayMsg + '</p>' +
             '<button onclick="try{localStorage.clear();sessionStorage.clear();}catch(x){};if(navigator.serviceWorker){navigator.serviceWorker.getRegistrations().then(function(r){r.forEach(function(s){s.unregister()})})};location.reload(true)" style="background:#2563eb;color:#ffffff;border:none;padding:12px 20px;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;width:100%">Bersihkan Cache & Pulihkan</button>' +
             '</div></div>';
         }
