@@ -534,15 +534,11 @@ class AppStore {
       }
     }
 
-    // Synchronize all database records, settings, and users with Supabase (primary) and Firestore in background
-    await this.syncAllWithSupabase();
-    await this.syncAllWithFirestore();
-    await this.fetchFromServer();
+    // Synchronize all database records, settings, and users in non-blocking background
     this.sanitizeData();
-    // Auto purge lingering Saturday Alpa records across Supabase, Firestore, and local store
-    await this.purgeSaturdayAlpaAttendance(true);
+    this.fetchFromServer().catch(() => {});
     if (this.syncQueue.length > 0) {
-      this.processPendingSyncQueue();
+      this.processPendingSyncQueue().catch(() => {});
     }
   }
 
@@ -1236,14 +1232,35 @@ class AppStore {
     };
   }
 
-  private notify() {
-    this.saveLocalData();
-    this.listeners.forEach((listener) => {
-      try {
-        listener();
-      } catch (e) {
-        console.error('Listener error:', e);
+  private notifyTimeout: any = null;
+
+  public notify(immediate = false) {
+    this.saveLocalData(immediate);
+    if (immediate) {
+      if (this.notifyTimeout) {
+        cancelAnimationFrame(this.notifyTimeout);
+        this.notifyTimeout = null;
       }
+      this.listeners.forEach((listener) => {
+        try {
+          listener();
+        } catch (e) {
+          console.error('Listener error:', e);
+        }
+      });
+      return;
+    }
+
+    if (this.notifyTimeout) return;
+    this.notifyTimeout = requestAnimationFrame(() => {
+      this.notifyTimeout = null;
+      this.listeners.forEach((listener) => {
+        try {
+          listener();
+        } catch (e) {
+          console.error('Listener error:', e);
+        }
+      });
     });
   }
 
@@ -2261,7 +2278,7 @@ class AppStore {
 
   public async fetchFromServer(force = false): Promise<void> {
     const now = Date.now();
-    if (!force && (this.isFetching || (now - this.lastFetchTime < 15000))) {
+    if (!force && (this.isFetching || (now - this.lastFetchTime < 30000))) {
       return;
     }
 
@@ -2270,6 +2287,7 @@ class AppStore {
 
     try {
       let changed = false;
+      let supabaseFetchedSuccessfully = false;
 
       // 1. PRIMARY SINGLE DATABASE: Supabase Cloud PostgreSQL
       const config = this.getSupabaseConfig();
@@ -2294,6 +2312,8 @@ class AppStore {
             fetchSettingsFromSupabase(config),
             fetchDispatchesFromSupabase(config),
           ]);
+
+          supabaseFetchedSuccessfully = true;
 
           if (remoteStudents !== null && remoteStudents.length > 0) {
             const sMap = new Map<string, Student>();
@@ -2367,71 +2387,73 @@ class AppStore {
         }
       }
 
-      // 2. BACKUP / MERGE CLOUD DATABASE: Firebase Firestore (Fail-safe)
-      try {
-        const [
-          remoteStudents,
-          remoteAttendance,
-          remoteTeachers,
-          remoteTeacherAttendance,
-          remoteLogs
-        ] = await Promise.all([
-          fetchStudentsFromFirestore(),
-          fetchAttendanceFromFirestore(),
-          fetchTeachersFromFirestore(),
-          fetchTeacherAttendanceFromFirestore(),
-          fetchLogsFromFirestore(),
-        ]);
+      // 2. BACKUP / MERGE CLOUD DATABASE: Firebase Firestore (Fail-safe only if Supabase not configured or failed)
+      if (!supabaseFetchedSuccessfully) {
+        try {
+          const [
+            remoteStudents,
+            remoteAttendance,
+            remoteTeachers,
+            remoteTeacherAttendance,
+            remoteLogs
+          ] = await Promise.all([
+            fetchStudentsFromFirestore(),
+            fetchAttendanceFromFirestore(),
+            fetchTeachersFromFirestore(),
+            fetchTeacherAttendanceFromFirestore(),
+            fetchLogsFromFirestore(),
+          ]);
 
-        if (remoteStudents && remoteStudents.length > 0 && this.students.length === 0) {
-          const sMap = new Map<string, Student>();
-          this.students.forEach((s) => sMap.set(s.id || s.nisn, s));
-          remoteStudents.forEach((s) => sMap.set(s.id || s.nisn, s));
-          this.students = Array.from(sMap.values());
-          changed = true;
-        }
+          if (remoteStudents && remoteStudents.length > 0 && this.students.length === 0) {
+            const sMap = new Map<string, Student>();
+            this.students.forEach((s) => sMap.set(s.id || s.nisn, s));
+            remoteStudents.forEach((s) => sMap.set(s.id || s.nisn, s));
+            this.students = Array.from(sMap.values());
+            changed = true;
+          }
 
-        if (remoteAttendance && remoteAttendance.length > 0) {
-          const aMap = new Map<string, AttendanceRecord>();
-          this.attendance.forEach((a) => aMap.set(a.id, a));
-          remoteAttendance.forEach((a) => {
-            if (!aMap.has(a.id)) {
-              aMap.set(a.id, a);
-              changed = true;
-            }
-          });
-          this.attendance = Array.from(aMap.values());
-        }
+          if (remoteAttendance && remoteAttendance.length > 0) {
+            const aMap = new Map<string, AttendanceRecord>();
+            this.attendance.forEach((a) => aMap.set(a.id, a));
+            remoteAttendance.forEach((a) => {
+              if (!aMap.has(a.id)) {
+                aMap.set(a.id, a);
+                changed = true;
+              }
+            });
+            this.attendance = Array.from(aMap.values());
+          }
 
-        if (remoteTeachers && remoteTeachers.length > 0 && this.teachers.length === 0) {
-          const tMap = new Map<string, Teacher>();
-          this.teachers.forEach((t) => tMap.set(t.id || t.nip, t));
-          remoteTeachers.forEach((t) => tMap.set(t.id || t.nip, t));
-          this.teachers = Array.from(tMap.values());
-          changed = true;
-        }
+          if (remoteTeachers && remoteTeachers.length > 0 && this.teachers.length === 0) {
+            const tMap = new Map<string, Teacher>();
+            this.teachers.forEach((t) => tMap.set(t.id || t.nip, t));
+            remoteTeachers.forEach((t) => tMap.set(t.id || t.nip, t));
+            this.teachers = Array.from(tMap.values());
+            changed = true;
+          }
 
-        if (remoteTeacherAttendance && remoteTeacherAttendance.length > 0) {
-          const taMap = new Map<string, TeacherAttendanceRecord>();
-          this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
-          remoteTeacherAttendance.forEach((ta) => {
-            if (!taMap.has(ta.id)) {
-              taMap.set(ta.id, ta);
-              changed = true;
-            }
-          });
-          this.teacherAttendance = Array.from(taMap.values());
-        }
+          if (remoteTeacherAttendance && remoteTeacherAttendance.length > 0) {
+            const taMap = new Map<string, TeacherAttendanceRecord>();
+            this.teacherAttendance.forEach((ta) => taMap.set(ta.id, ta));
+            remoteTeacherAttendance.forEach((ta) => {
+              if (!taMap.has(ta.id)) {
+                taMap.set(ta.id, ta);
+                changed = true;
+              }
+            });
+            this.teacherAttendance = Array.from(taMap.values());
+          }
 
-        if (remoteLogs && remoteLogs.length > 0 && this.logs.length === 0) {
-          const lMap = new Map<string, ActivityLog>();
-          this.logs.forEach((l) => lMap.set(l.id, l));
-          remoteLogs.forEach((l) => lMap.set(l.id, l));
-          this.logs = Array.from(lMap.values()).slice(0, 500);
-          changed = true;
+          if (remoteLogs && remoteLogs.length > 0 && this.logs.length === 0) {
+            const lMap = new Map<string, ActivityLog>();
+            this.logs.forEach((l) => lMap.set(l.id, l));
+            remoteLogs.forEach((l) => lMap.set(l.id, l));
+            this.logs = Array.from(lMap.values()).slice(0, 500);
+            changed = true;
+          }
+        } catch (fErr) {
+          console.warn('Firestore fallback fetch notice:', fErr);
         }
-      } catch (fErr) {
-        console.warn('Firestore fallback fetch notice:', fErr);
       }
 
       this.processAutoAlpa();
@@ -5311,6 +5333,20 @@ class AppStore {
     const minTerlambat = options?.minTerlambat ?? this.settings.problemThresholdTerlambat ?? 3;
     const maxAttendanceRate = options?.maxAttendanceRate ?? this.settings.problemThresholdMinRate ?? 75;
 
+    // Pre-index scoped attendance by NISN for ultra-fast O(1) lookups
+    const studentAttendanceMap = new Map<string, AttendanceRecord[]>();
+    for (let i = 0; i < scopedAttendance.length; i++) {
+      const a = scopedAttendance[i];
+      if (a.jenis === 'Masuk' && a.nisn) {
+        let arr = studentAttendanceMap.get(a.nisn);
+        if (!arr) {
+          arr = [];
+          studentAttendanceMap.set(a.nisn, arr);
+        }
+        arr.push(a);
+      }
+    }
+
     const list: Array<any> = [];
 
     activeStudents.forEach((student) => {
@@ -5318,7 +5354,7 @@ class AppStore {
         return;
       }
 
-      const studentRecords = scopedAttendance.filter((a) => a.nisn === student.nisn && a.jenis === 'Masuk');
+      const studentRecords = studentAttendanceMap.get(student.nisn) || [];
       const studentUniqueDates = new Set(studentRecords.map((r) => r.tanggal));
       const studentTotalDays = Math.max(studentUniqueDates.size, totalRecordedDays);
 

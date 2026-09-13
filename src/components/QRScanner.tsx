@@ -217,7 +217,6 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     setTeachersList(store.getTeachers());
     setAttendanceList(store.getAttendance());
     setTeacherAttendanceList(store.getTeacherAttendance());
-    store.fetchFromServer();
 
     const handleOnline = () => {
       setIsOnline(true);
@@ -1809,7 +1808,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-slate-900/85 backdrop-blur-md text-emerald-400 border border-emerald-500/40 shadow-xs flex items-center gap-1">
                     <Sparkles className="w-3 h-3" />
-                    <span>FHD 1080p ⚡ GPU</span>
+                    <span>Mode Ringan ⚡ Cepat</span>
                   </span>
                   <button
                     type="button"

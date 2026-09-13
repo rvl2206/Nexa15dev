@@ -70,10 +70,24 @@ export const LowAttendanceNotifications: React.FC<LowAttendanceNotificationsProp
     const allUniqueDates = Array.from(new Set(attendance.map((a) => a.tanggal)));
     const totalRecordedDays = Math.max(allUniqueDates.length, 1);
 
+    // Pre-index attendance by NISN for fast O(1) lookup
+    const studentAttendanceMap = new Map<string, AttendanceRecord[]>();
+    for (let i = 0; i < attendance.length; i++) {
+      const a = attendance[i];
+      if (a.jenis === 'Masuk' && a.nisn) {
+        let arr = studentAttendanceMap.get(a.nisn);
+        if (!arr) {
+          arr = [];
+          studentAttendanceMap.set(a.nisn, arr);
+        }
+        arr.push(a);
+      }
+    }
+
     const list: FlaggedStudent[] = [];
 
     activeStudents.forEach((student) => {
-      const studentRecords = attendance.filter((a) => a.nisn === student.nisn && a.jenis === 'Masuk');
+      const studentRecords = studentAttendanceMap.get(student.nisn) || [];
 
       // Unique dates this student had recorded attendance
       const studentUniqueDates = new Set(studentRecords.map((r) => r.tanggal));

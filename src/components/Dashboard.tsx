@@ -189,24 +189,38 @@ export const Dashboard: React.FC<DashboardProps> = ({ onNavigateTab }) => {
       ])
     ).filter(Boolean).sort();
 
+    const studentClassCountMap = new Map<string, number>();
+    students.forEach((s) => {
+      if (s.status === 'aktif' && s.kelas) {
+        const k = s.kelas.trim().toLowerCase();
+        studentClassCountMap.set(k, (studentClassCountMap.get(k) || 0) + 1);
+      }
+    });
+
+    const recordClassMap = new Map<string, { hadir: number; terlambat: number; alpa: number }>();
+    uniqueDailyRecords.forEach((a) => {
+      if (a.kelas) {
+        const k = a.kelas.trim().toLowerCase();
+        let cur = recordClassMap.get(k);
+        if (!cur) {
+          cur = { hadir: 0, terlambat: 0, alpa: 0 };
+          recordClassMap.set(k, cur);
+        }
+        if (a.status === 'Hadir') cur.hadir++;
+        else if (a.status === 'Terlambat') cur.terlambat++;
+        else if (a.status === 'Alpa') cur.alpa++;
+      }
+    });
+
     return classList.map((cls) => {
-      const clsStudents = students.filter(
-        (s) => s.kelas.trim().toLowerCase() === cls.toLowerCase() && s.status === 'aktif'
-      );
-      const clsRecords = uniqueDailyRecords.filter(
-        (a) => a.kelas.trim().toLowerCase() === cls.toLowerCase()
-      );
-
-      const hadir = clsRecords.filter((a) => a.status === 'Hadir').length;
-      const terlambat = clsRecords.filter((a) => a.status === 'Terlambat').length;
-      const alpa = clsRecords.filter((a) => a.status === 'Alpa').length;
-
+      const k = cls.toLowerCase();
+      const stats = recordClassMap.get(k) || { hadir: 0, terlambat: 0, alpa: 0 };
       return {
         kelas: cls,
-        TotalSiswa: clsStudents.length,
-        Hadir: hadir,
-        Terlambat: terlambat,
-        Alpa: alpa,
+        TotalSiswa: studentClassCountMap.get(k) || 0,
+        Hadir: stats.hadir,
+        Terlambat: stats.terlambat,
+        Alpa: stats.alpa,
       };
     });
   }, [students, attendance, uniqueDailyRecords]);
