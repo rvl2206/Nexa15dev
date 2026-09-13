@@ -2256,7 +2256,18 @@ class AppStore {
     };
   }
 
-  public async fetchFromServer(): Promise<void> {
+  private lastFetchTime = 0;
+  private isFetching = false;
+
+  public async fetchFromServer(force = false): Promise<void> {
+    const now = Date.now();
+    if (!force && (this.isFetching || (now - this.lastFetchTime < 15000))) {
+      return;
+    }
+
+    this.isFetching = true;
+    this.lastFetchTime = now;
+
     try {
       let changed = false;
 
@@ -2430,6 +2441,8 @@ class AppStore {
       }
     } catch (err: any) {
       console.warn('Fetch server error notice:', err?.message || err);
+    } finally {
+      this.isFetching = false;
     }
   }
 

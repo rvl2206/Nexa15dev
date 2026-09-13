@@ -1248,51 +1248,50 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
       if (videoEl && videoEl.readyState >= 2 && !videoEl.paused && !videoEl.ended) {
         const now = performance.now();
-        // Scan every ~40-50ms for hyper-fast response
-        if (now - lastParallelScanTimeRef.current >= 45 && !isProcessingRef.current) {
+
+        // 1. Native GPU BarcodeDetector (Chrome/Edge/Android) - Runs ultra-fast in GPU thread without locking JS
+        if (barcodeDetectorRef.current && now - lastParallelScanTimeRef.current >= 80 && !isProcessingRef.current) {
           lastParallelScanTimeRef.current = now;
-
-          // Engine 1: Native GPU-Accelerated BarcodeDetector (Chrome/Android/Edge)
-          if (barcodeDetectorRef.current) {
-            barcodeDetectorRef.current
-              .detect(videoEl)
-              .then((barcodes: any[]) => {
-                if (barcodes && barcodes.length > 0) {
-                  const val = barcodes[0].rawValue || barcodes[0].displayValue;
-                  if (val) processScannedCode(val);
-                }
-              })
-              .catch(() => {});
-          }
-
-          // Engine 2: Turbo jsQR Multi-Scale & High-Resolution Center Crop (Ultra Sharp for Micro QR)
+          barcodeDetectorRef.current
+            .detect(videoEl)
+            .then((barcodes: any[]) => {
+              if (barcodes && barcodes.length > 0) {
+                const val = barcodes[0].rawValue || barcodes[0].displayValue;
+                if (val) processScannedCode(val);
+              }
+            })
+            .catch(() => {});
+        } else if (!barcodeDetectorRef.current && now - lastParallelScanTimeRef.current >= 300 && !isProcessingRef.current) {
+          // 2. Fallback CPU jsQR: Throttled to 300ms with a small lightweight Region of Interest (ROI) to keep UI 60fps
+          lastParallelScanTimeRef.current = now;
           if (!turboCanvasRef.current) {
             turboCanvasRef.current = document.createElement('canvas');
           }
           const canvas = turboCanvasRef.current;
           const ctx = canvas.getContext('2d', { willReadFrequently: true });
           if (ctx) {
-            const vw = videoEl.videoWidth || 1280;
-            const vh = videoEl.videoHeight || 720;
+            const vw = videoEl.videoWidth || 640;
+            const vh = videoEl.videoHeight || 480;
 
-            // Crop central 55% Region Of Interest (ROI) for 2x crisp optical magnification
-            const cropW = Math.floor(vw * 0.55);
-            const cropH = Math.floor(vh * 0.55);
-            const cropX = Math.floor((vw - cropW) / 2);
-            const cropY = Math.floor((vh - cropH) / 2);
+            // Compact central crop (max 320x320) for minimal CPU memory footprint
+            const targetDim = Math.min(320, Math.floor(Math.min(vw, vh) * 0.7));
+            const cropX = Math.floor((vw - targetDim) / 2);
+            const cropY = Math.floor((vh - targetDim) / 2);
 
-            canvas.width = cropW;
-            canvas.height = cropH;
+            canvas.width = targetDim;
+            canvas.height = targetDim;
 
-            ctx.drawImage(videoEl, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-            const imgData = ctx.getImageData(0, 0, cropW, cropH);
-            const code = jsQR(imgData.data, cropW, cropH, {
-              inversionAttempts: 'attemptBoth',
-            });
+            ctx.drawImage(videoEl, cropX, cropY, targetDim, targetDim, 0, 0, targetDim, targetDim);
+            try {
+              const imgData = ctx.getImageData(0, 0, targetDim, targetDim);
+              const code = jsQR(imgData.data, targetDim, targetDim, {
+                inversionAttempts: 'dontInvert',
+              });
 
-            if (code && code.data) {
-              processScannedCode(code.data);
-            }
+              if (code && code.data) {
+                processScannedCode(code.data);
+              }
+            } catch {}
           }
         }
       }
@@ -1311,56 +1310,54 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       setScanResult(null);
       setCameraErrorMessage('');
 
-      // Brief DOM mount pause
-      await new Promise((resolve) => setTimeout(resolve, 150));
+      // Brief pause to ensure DOM container #reader is mounted
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       const targetCamId = camIdOverride || selectedCameraId;
 
       const config = {
-        fps: scanFps,
+        fps: Math.min(25, scanFps || 20),
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          const edgeSize = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.85);
+          const edgeSize = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.82);
           return { width: edgeSize, height: edgeSize };
         },
         aspectRatio: 1.0,
         disableFlip: false,
       };
 
-      // Progressive fallback constraints: Start with sharpest FHD, fallback gracefully down to standard/any camera
-      // Crucial: Avoid hard 'min' constraints and never mix 'deviceId' with 'facingMode' to avoid OverconstrainedError!
+      // Progressive and robust fallback constraints
+      // Avoid hard 'exact' or 'min' constraints to prevent OverconstrainedError on varied mobile cameras
       const candidateConstraints: any[] = [];
 
       if (targetCamId) {
-        // Candidate 1: Selected camera with ideal Full HD 1080p
         candidateConstraints.push({
-          deviceId: { exact: targetCamId },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          deviceId: targetCamId,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         });
-        // Candidate 2: Selected camera default resolution
         candidateConstraints.push({
-          deviceId: { exact: targetCamId },
+          deviceId: targetCamId,
         });
       }
 
-      // Candidate 3: Rear (environment) camera with ideal Full HD 1080p
+      // Default rear camera with balanced 720p / 1080p resolution
       candidateConstraints.push({
-        facingMode: 'environment',
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
       });
 
-      // Candidate 4: Rear camera standard
+      // Rear camera standard
       candidateConstraints.push({
         facingMode: 'environment',
       });
 
-      // Candidate 5: Front camera or laptop webcam
+      // Front camera / webcam fallback
       candidateConstraints.push({
         facingMode: 'user',
       });
 
-      // Candidate 6: Absolute universal fallback
+      // Universal fallback
       candidateConstraints.push({});
 
       let started = false;
@@ -1371,6 +1368,10 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         try {
           // Recreate clean Html5Qrcode instance
           if (!scannerRef.current) {
+            const readerEl = document.getElementById('reader');
+            if (!readerEl) {
+              await new Promise((r) => setTimeout(r, 100));
+            }
             scannerRef.current = new Html5Qrcode('reader', {
               formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
               verbose: false,
