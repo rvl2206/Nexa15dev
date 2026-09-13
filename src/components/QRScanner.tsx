@@ -114,7 +114,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   // Performance & Queue Options - Mode Scan Massal starts DISABLED so popup info shows for 3 seconds
   const [rapidQueueMode, setRapidQueueMode] = useState<boolean>(false); // Mode Antrean Cepat (false by default)
   const [debounceSeconds, setDebounceSeconds] = useState<number>(3); // 3 seconds debounce per same QR
-  const [scanFps, setScanFps] = useState<number>(20); // 20 FPS high responsiveness
+  const [scanFps, setScanFps] = useState<number>(15); // 15 FPS balanced responsiveness & lightweight CPU
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [modalDuration, setModalDuration] = useState<number>(3); // Durasi popup 3 detik
 
@@ -124,12 +124,12 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const [scanFlash, setScanFlash] = useState<boolean>(false);
 
   // Schema 1: Turbo Digital Zoom & Small QR Enhancements
-  const [zoomLevel, setZoomLevel] = useState<number>(1.5); // Default 1.5x zoom so tiny QRs are captured instantly without macro blur
-  const [macroMode, setMacroMode] = useState<boolean>(true); // Mode Makro QR Kecil aktif default
+  const [zoomLevel, setZoomLevel] = useState<number>(1.2); // Default 1.2x zoom
+  const [macroMode, setMacroMode] = useState<boolean>(false);
   const [isTorchOn, setIsTorchOn] = useState<boolean>(false);
   const [isTorchSupported, setIsTorchSupported] = useState<boolean>(false);
   const [isHardwareZoomSupported, setIsHardwareZoomSupported] = useState<boolean>(false);
-  const [activeEngineLabel, setActiveEngineLabel] = useState<string>('Dual Turbo Engine (GPU + jsQR)');
+  const [activeEngineLabel, setActiveEngineLabel] = useState<string>('Standard Fast Engine');
   const [tapFocusCoord, setTapFocusCoord] = useState<{ x: number; y: number } | null>(null);
   const [cameraPermissionStatus, setCameraPermissionStatus] = useState<'prompt' | 'granted' | 'denied' | 'error'>('prompt');
   const [cameraErrorMessage, setCameraErrorMessage] = useState<string>('');
@@ -138,10 +138,6 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const [showPermissionGuide, setShowPermissionGuide] = useState<boolean>(false);
 
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
-  const turboScanFrameIdRef = useRef<number | null>(null);
-  const turboCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const barcodeDetectorRef = useRef<any>(null);
-  const lastParallelScanTimeRef = useRef<number>(0);
 
   const [countdown, setCountdown] = useState<number>(3);
   const [lastScannedQR, setLastScannedQR] = useState<string>('');
@@ -1135,28 +1131,9 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     setSelectedTeacherForQR('');
   };
 
-  // Check Native BarcodeDetector API availability on load
+  // Set Fast Scanner Engine Label
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'BarcodeDetector' in window) {
-      try {
-        (window as any).BarcodeDetector.getSupportedFormats()
-          .then((formats: string[]) => {
-            if (formats && formats.includes('qr_code')) {
-              barcodeDetectorRef.current = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
-              setActiveEngineLabel('Native GPU BarcodeDetector ⚡');
-            } else {
-              setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
-            }
-          })
-          .catch(() => {
-            setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
-          });
-      } catch {
-        setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
-      }
-    } else {
-      setActiveEngineLabel('Turbo jsQR Multi-Scale ⚡');
-    }
+    setActiveEngineLabel('Fast Hardware Scanner');
   }, []);
 
   const handleApplyZoom = async (newZoom: number) => {
@@ -1212,11 +1189,11 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     const nextMode = !macroMode;
     setMacroMode(nextMode);
     if (nextMode) {
-      handleApplyZoom(2.0);
-      toast.success('Mode Makro Aktif (2.0x Zoom)', 'Kamera dioptimalkan khusus untuk membaca QR Code berukuran kecil atau dari jarak nyaman.');
+      handleApplyZoom(1.5);
+      toast.success('Mode Makro Aktif', 'Kamera dioptimalkan untuk membaca QR Code jarak dekat.');
     } else {
       handleApplyZoom(1.0);
-      toast.info('Mode Standar Aktif (1.0x Zoom)', 'Zoom kamera dikembalikan ke sudut normal.');
+      toast.info('Mode Standar Aktif', 'Zoom kamera dikembalikan ke sudut normal.');
     }
   };
 
@@ -1236,72 +1213,6 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     }
   };
 
-  const startTurboScanLoop = () => {
-    if (turboScanFrameIdRef.current) {
-      cancelAnimationFrame(turboScanFrameIdRef.current);
-      turboScanFrameIdRef.current = null;
-    }
-
-    const scanFrame = () => {
-      if (!scannerRef.current) return;
-
-      const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
-      if (videoEl && videoEl.readyState >= 2 && !videoEl.paused && !videoEl.ended) {
-        const now = performance.now();
-
-        // 1. Native GPU BarcodeDetector (Chrome/Edge/Android) - Runs ultra-fast in GPU thread without locking JS
-        if (barcodeDetectorRef.current && now - lastParallelScanTimeRef.current >= 80 && !isProcessingRef.current) {
-          lastParallelScanTimeRef.current = now;
-          barcodeDetectorRef.current
-            .detect(videoEl)
-            .then((barcodes: any[]) => {
-              if (barcodes && barcodes.length > 0) {
-                const val = barcodes[0].rawValue || barcodes[0].displayValue;
-                if (val) processScannedCode(val);
-              }
-            })
-            .catch(() => {});
-        } else if (!barcodeDetectorRef.current && now - lastParallelScanTimeRef.current >= 300 && !isProcessingRef.current) {
-          // 2. Fallback CPU jsQR: Throttled to 300ms with a small lightweight Region of Interest (ROI) to keep UI 60fps
-          lastParallelScanTimeRef.current = now;
-          if (!turboCanvasRef.current) {
-            turboCanvasRef.current = document.createElement('canvas');
-          }
-          const canvas = turboCanvasRef.current;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          if (ctx) {
-            const vw = videoEl.videoWidth || 640;
-            const vh = videoEl.videoHeight || 480;
-
-            // Compact central crop (max 320x320) for minimal CPU memory footprint
-            const targetDim = Math.min(320, Math.floor(Math.min(vw, vh) * 0.7));
-            const cropX = Math.floor((vw - targetDim) / 2);
-            const cropY = Math.floor((vh - targetDim) / 2);
-
-            canvas.width = targetDim;
-            canvas.height = targetDim;
-
-            ctx.drawImage(videoEl, cropX, cropY, targetDim, targetDim, 0, 0, targetDim, targetDim);
-            try {
-              const imgData = ctx.getImageData(0, 0, targetDim, targetDim);
-              const code = jsQR(imgData.data, targetDim, targetDim, {
-                inversionAttempts: 'dontInvert',
-              });
-
-              if (code && code.data) {
-                processScannedCode(code.data);
-              }
-            } catch {}
-          }
-        }
-      }
-
-      turboScanFrameIdRef.current = requestAnimationFrame(scanFrame);
-    };
-
-    turboScanFrameIdRef.current = requestAnimationFrame(scanFrame);
-  };
-
   const startCamera = async (camIdOverride?: string) => {
     try {
       setIsStartingCamera(true);
@@ -1311,12 +1222,12 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       setCameraErrorMessage('');
 
       // Brief pause to ensure DOM container #reader is mounted
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 80));
 
       const targetCamId = camIdOverride || selectedCameraId;
 
       const config = {
-        fps: Math.min(25, scanFps || 20),
+        fps: Math.min(20, scanFps || 15),
         qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
           const edgeSize = Math.floor(Math.min(viewfinderWidth, viewfinderHeight) * 0.82);
           return { width: edgeSize, height: edgeSize };
@@ -1325,26 +1236,25 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         disableFlip: false,
       };
 
-      // Progressive and robust fallback constraints
-      // Avoid hard 'exact' or 'min' constraints to prevent OverconstrainedError on varied mobile cameras
+      // Lightweight, efficient standard constraints (VGA / 480p / 720p - zero 1080p lag)
       const candidateConstraints: any[] = [];
 
       if (targetCamId) {
         candidateConstraints.push({
           deviceId: targetCamId,
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
         });
         candidateConstraints.push({
           deviceId: targetCamId,
         });
       }
 
-      // Default rear camera with balanced 720p / 1080p resolution
+      // Default rear camera with lightweight 640x480 resolution
       candidateConstraints.push({
         facingMode: { ideal: 'environment' },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        width: { ideal: 640 },
+        height: { ideal: 480 },
       });
 
       // Rear camera standard
@@ -1355,6 +1265,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       // Front camera / webcam fallback
       candidateConstraints.push({
         facingMode: 'user',
+        width: { ideal: 640 },
+        height: { ideal: 480 },
       });
 
       // Universal fallback
@@ -1370,7 +1282,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
           if (!scannerRef.current) {
             const readerEl = document.getElementById('reader');
             if (!readerEl) {
-              await new Promise((r) => setTimeout(r, 100));
+              await new Promise((r) => setTimeout(r, 80));
             }
             scannerRef.current = new Html5Qrcode('reader', {
               formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
@@ -1433,7 +1345,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         throw lastErr || new Error('Gagal membuka aliran video kamera setelah beberapa konfigurasi.');
       }
 
-      // Inspect hardware stream track capabilities and apply initial Zoom & Macro configuration
+      // Inspect hardware stream track capabilities and apply initial Zoom configuration
       setTimeout(() => {
         try {
           const videoEl = document.querySelector('#reader video') as HTMLVideoElement;
@@ -1449,7 +1361,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                 }
                 if (caps && caps.zoom) {
                   setIsHardwareZoomSupported(true);
-                  const initialZ = macroMode ? 2.0 : zoomLevel;
+                  const initialZ = macroMode ? 1.5 : zoomLevel;
                   track.applyConstraints({
                     advanced: [{ zoom: initialZ } as any],
                   }).catch(() => {});
@@ -1464,7 +1376,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
             }
 
             // Visual zoom scaling
-            const initialZoomVal = macroMode ? 2.0 : zoomLevel;
+            const initialZoomVal = macroMode ? 1.5 : zoomLevel;
             videoEl.style.transform = `scale(${initialZoomVal})`;
             videoEl.style.transformOrigin = 'center center';
             videoEl.style.transition = 'transform 0.2s ease-out';
@@ -1472,10 +1384,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
         } catch (e) {
           console.log('Track capabilities inspection info:', e);
         }
-
-        // Start turbo parallel scanner loop
-        startTurboScanLoop();
-      }, 250);
+      }, 150);
     } catch (err: any) {
       console.error('Camera activation error:', err);
       setIsCameraActive(false);
@@ -1504,10 +1413,6 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const stopCamera = async () => {
     setIsStartingCamera(false);
     setIsRequestingPermission(false);
-    if (turboScanFrameIdRef.current) {
-      cancelAnimationFrame(turboScanFrameIdRef.current);
-      turboScanFrameIdRef.current = null;
-    }
     if (scannerRef.current && scannerRef.current.isScanning) {
       try {
         await scannerRef.current.stop();
