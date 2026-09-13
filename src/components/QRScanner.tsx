@@ -134,6 +134,7 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   const [cameraPermissionStatus, setCameraPermissionStatus] = useState<'prompt' | 'granted' | 'denied' | 'error'>('prompt');
   const [cameraErrorMessage, setCameraErrorMessage] = useState<string>('');
   const [isRequestingPermission, setIsRequestingPermission] = useState<boolean>(false);
+  const [isStartingCamera, setIsStartingCamera] = useState<boolean>(true);
   const [showPermissionGuide, setShowPermissionGuide] = useState<boolean>(false);
 
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
@@ -254,7 +255,45 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
       setHasNfcSupport(true);
     }
 
+    // Auto-trigger camera startup on menu open so browser immediately displays the permission prompt
+    let autoStartTimer: NodeJS.Timeout | null = null;
+    if (typeof navigator !== 'undefined' && navigator.mediaDevices) {
+      setIsStartingCamera(true);
+      autoStartTimer = setTimeout(() => {
+        startCamera();
+      }, 300);
+    }
+
+    // Check camera permission status via Permissions API if supported
+    if (typeof navigator !== 'undefined' && (navigator as any).permissions && (navigator as any).permissions.query) {
+      (navigator as any).permissions
+        .query({ name: 'camera' })
+        .then((perm: any) => {
+          if (perm.state === 'granted') {
+            setCameraPermissionStatus('granted');
+            setShowPermissionGuide(false);
+          } else if (perm.state === 'denied') {
+            setCameraPermissionStatus('denied');
+            setShowPermissionGuide(true);
+            setIsStartingCamera(false);
+          }
+          perm.onchange = () => {
+            if (perm.state === 'granted') {
+              setCameraPermissionStatus('granted');
+              setShowPermissionGuide(false);
+              startCamera();
+            } else if (perm.state === 'denied') {
+              setCameraPermissionStatus('denied');
+              setShowPermissionGuide(true);
+              stopCamera();
+            }
+          };
+        })
+        .catch(() => {});
+    }
+
     return () => {
+      if (autoStartTimer) clearTimeout(autoStartTimer);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       if (nfcAbortControllerRef.current) {
@@ -1266,6 +1305,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
 
   const startCamera = async (camIdOverride?: string) => {
     try {
+      setIsStartingCamera(true);
+      setIsRequestingPermission(true);
       await stopCamera();
       setScanResult(null);
       setCameraErrorMessage('');
@@ -1349,9 +1390,13 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
 
           started = true;
           setIsCameraActive(true);
+          setIsStartingCamera(false);
+          setIsRequestingPermission(false);
           setCameraPermissionStatus('granted');
           setCameraErrorMessage('');
           setShowPermissionGuide(false);
+          // Refresh camera list now that permissions are granted to show real device labels
+          fetchAvailableCameras();
           break;
         } catch (err: any) {
           lastErr = err;
@@ -1365,6 +1410,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
             errMsg.toLowerCase().includes('permission') ||
             errMsg.toLowerCase().includes('denied')
           ) {
+            setIsStartingCamera(false);
+            setIsRequestingPermission(false);
             setCameraPermissionStatus('denied');
             setCameraErrorMessage('Izin kamera ditolak oleh browser. Silakan klik "Minta Izin Ulang" atau ubah izin situs di browser.');
             setShowPermissionGuide(true);
@@ -1431,6 +1478,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
     } catch (err: any) {
       console.error('Camera activation error:', err);
       setIsCameraActive(false);
+      setIsStartingCamera(false);
+      setIsRequestingPermission(false);
       const errName = err?.name || '';
       const errMsg = err?.message || '';
 
@@ -1452,6 +1501,8 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
   };
 
   const stopCamera = async () => {
+    setIsStartingCamera(false);
+    setIsRequestingPermission(false);
     if (turboScanFrameIdRef.current) {
       cancelAnimationFrame(turboScanFrameIdRef.current);
       turboScanFrameIdRef.current = null;
@@ -1959,12 +2010,41 @@ export const QRScanner: React.FC<QRScannerProps> = ({ currentOfficer }) => {
                         onClick={() => {
                           setShowPermissionGuide(false);
                           setCameraPermissionStatus('prompt');
+                          setIsStartingCamera(false);
                         }}
                         className="text-[11px] text-slate-400 hover:text-slate-200 underline mt-0.5 cursor-pointer"
                       >
                         Tutup Panduan & Coba Mulai Lagi
                       </button>
                     </div>
+                  </div>
+                ) : isStartingCamera ? (
+                  <div className="flex flex-col items-center space-y-3.5 max-w-xs">
+                    <div className="relative">
+                      <div className="w-16 h-16 rounded-2xl bg-blue-600/20 text-cyan-400 border border-cyan-500/40 flex items-center justify-center shadow-lg animate-pulse">
+                        <Camera className="w-8 h-8 text-cyan-400" />
+                      </div>
+                      <span className="absolute -top-1 -right-1 flex h-4 w-4">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-4 w-4 bg-cyan-500 border-2 border-slate-950"></span>
+                      </span>
+                    </div>
+                    <div>
+                      <h3 className="text-white font-bold text-sm sm:text-base flex items-center justify-center gap-1.5">
+                        <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
+                        <span>Menghubungkan Kamera...</span>
+                      </h3>
+                      <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
+                        Meminta izin akses kamera dari browser. Harap klik <strong className="text-cyan-300">"Izinkan" (Allow)</strong> pada notifikasi izin browser yang muncul.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => requestCameraAccess()}
+                      className="text-xs text-cyan-400 hover:text-cyan-300 underline font-medium cursor-pointer pt-1"
+                    >
+                      Buka Dialog Izin Ulang
+                    </button>
                   </div>
                 ) : (
                   <div className="flex flex-col items-center space-y-3">
