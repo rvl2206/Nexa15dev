@@ -668,32 +668,64 @@ class AppStore {
   }
 
   private saveTimeout: any = null;
+  private dirtyFlags = {
+    users: false,
+    students: false,
+    attendance: false,
+    teachers: false,
+    teacherAttendance: false,
+    logs: false,
+    syncQueue: false,
+    dispatches: false,
+  };
+
+  public markDirty(key?: keyof typeof this.dirtyFlags) {
+    if (key) {
+      this.dirtyFlags[key] = true;
+    } else {
+      Object.keys(this.dirtyFlags).forEach((k) => {
+        (this.dirtyFlags as any)[k] = true;
+      });
+    }
+  }
 
   private saveLocalData(immediate = false) {
     const doSave = () => {
       try {
-        localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(this.users));
-        localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(this.students));
-        
-        // Prevent LocalStorage from crashing when data gets huge (Max 5MB quota)
-        // Only keep the most recent 2000 attendance records in local cache
-        let attendanceToSave = this.attendance;
-        if (attendanceToSave.length > 2000) {
-          attendanceToSave = [...attendanceToSave].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime()).slice(0, 2000);
+        if (this.dirtyFlags.users) {
+          localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(this.users));
+          this.dirtyFlags.users = false;
         }
-        localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(attendanceToSave));
-        
-        localStorage.setItem(STORAGE_KEYS.TEACHERS, JSON.stringify(this.teachers));
-        
-        let teacherAttToSave = this.teacherAttendance;
-        if (teacherAttToSave.length > 2000) {
-          teacherAttToSave = [...teacherAttToSave].sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime()).slice(0, 2000);
+        if (this.dirtyFlags.students) {
+          localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(this.students));
+          this.dirtyFlags.students = false;
         }
-        localStorage.setItem(STORAGE_KEYS.TEACHER_ATTENDANCE, JSON.stringify(teacherAttToSave));
-        
-        localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(this.logs));
-        localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(this.syncQueue));
-        localStorage.setItem(STORAGE_KEYS.DISPATCHES, JSON.stringify(this.dispatches));
+        if (this.dirtyFlags.attendance) {
+          const attendanceToSave = this.attendance.length > 2000 ? this.attendance.slice(0, 2000) : this.attendance;
+          localStorage.setItem(STORAGE_KEYS.ATTENDANCE, JSON.stringify(attendanceToSave));
+          this.dirtyFlags.attendance = false;
+        }
+        if (this.dirtyFlags.teachers) {
+          localStorage.setItem(STORAGE_KEYS.TEACHERS, JSON.stringify(this.teachers));
+          this.dirtyFlags.teachers = false;
+        }
+        if (this.dirtyFlags.teacherAttendance) {
+          const teacherAttToSave = this.teacherAttendance.length > 2000 ? this.teacherAttendance.slice(0, 2000) : this.teacherAttendance;
+          localStorage.setItem(STORAGE_KEYS.TEACHER_ATTENDANCE, JSON.stringify(teacherAttToSave));
+          this.dirtyFlags.teacherAttendance = false;
+        }
+        if (this.dirtyFlags.logs) {
+          localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(this.logs.slice(0, 300)));
+          this.dirtyFlags.logs = false;
+        }
+        if (this.dirtyFlags.syncQueue) {
+          localStorage.setItem(STORAGE_KEYS.SYNC_QUEUE, JSON.stringify(this.syncQueue));
+          this.dirtyFlags.syncQueue = false;
+        }
+        if (this.dirtyFlags.dispatches) {
+          localStorage.setItem(STORAGE_KEYS.DISPATCHES, JSON.stringify(this.dispatches));
+          this.dirtyFlags.dispatches = false;
+        }
       } catch (e) {
         console.warn('LocalStorage save error:', e);
       }
@@ -711,7 +743,7 @@ class AppStore {
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
     }
-    this.saveTimeout = setTimeout(doSave, 80);
+    this.saveTimeout = setTimeout(doSave, 300);
   }
 
   public enqueueSync(item: { id: string; type: SyncQueueItem['type']; action: SyncQueueItem['action']; data?: any }) {

@@ -444,7 +444,6 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
   useEffect(() => {
     setAttendance(store.getAttendance());
     setStudents(store.getStudents());
-    store.fetchFromServer();
     setLastUpdated(new Date());
 
     const unsubscribe = store.subscribe(() => {
@@ -648,7 +647,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     });
   }, [attendance, filterNama, filterKelas, filterStatus, filterJenis, recapMode, filterTanggal, filterBulan, semuaTanggalFilter, isRecordForInactiveStudent]);
 
-  // Calculate Monthly Summary per Student
+  // Calculate Monthly Summary per Student using fast HashMaps
   const monthlyStudentSummaries: StudentMonthlySummary[] = React.useMemo(() => {
     const cutoffTime = store.getSettings().cutoffTime || '07:15';
 
@@ -664,14 +663,36 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
 
     const recordsInMonth = attendance.filter((r) => isMatchBulan(r, filterBulan) && !isRecordForInactiveStudent(r));
 
-    // Get unique dates with active attendance in the selected month
-    const uniqueActiveDates = Array.from(
-      new Set(
-        recordsInMonth
-          .map((r) => normalizeToYyyyMmDd(r.tanggal) || normalizeToYyyyMmDd(r.timestamp))
-          .filter(Boolean)
-      )
-    );
+    // Pre-index records in month by NISN -> Date -> { masuk, pulang }
+    const studentDateMap = new Map<string, Map<string, { masuk?: AttendanceRecord; pulang?: AttendanceRecord }>>();
+    const uniqueActiveDatesSet = new Set<string>();
+
+    for (let i = 0; i < recordsInMonth.length; i++) {
+      const r = recordsInMonth[i];
+      const d = normalizeToYyyyMmDd(r.tanggal) || normalizeToYyyyMmDd(r.timestamp);
+      if (d) uniqueActiveDatesSet.add(d);
+
+      if (!r.nisn) continue;
+      let dateMap = studentDateMap.get(r.nisn);
+      if (!dateMap) {
+        dateMap = new Map();
+        studentDateMap.set(r.nisn, dateMap);
+      }
+      let dayEntry = dateMap.get(d);
+      if (!dayEntry) {
+        dayEntry = {};
+        dateMap.set(d, dayEntry);
+      }
+      if (r.jenis === 'Masuk' && !dayEntry.masuk) {
+        dayEntry.masuk = r;
+      } else if (r.jenis === 'Pulang' && !dayEntry.pulang) {
+        dayEntry.pulang = r;
+      } else if (!dayEntry.masuk && !dayEntry.pulang) {
+        dayEntry.masuk = r;
+      }
+    }
+
+    const uniqueActiveDates = Array.from(uniqueActiveDatesSet);
 
     return activeStudents.map((student) => {
       let hadir = 0;
@@ -683,24 +704,29 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
       let tanpaAbsenPulang = 0;
       let tanpaAbsenMasuk = 0;
 
+      const dateMap = studentDateMap.get(student.nisn);
+
       if (uniqueActiveDates.length === 0) {
-        const studentRecords = recordsInMonth.filter((r) => r.nisn === student.nisn && r.jenis === 'Masuk');
-        studentRecords.forEach((r) => {
-          if (r.status === 'Hadir') hadir++;
-          else if (r.status === 'Terlambat') {
-            terlambat++;
-            totalTerlambatMenit += calculateLateMinutes(r, cutoffTime);
-          } else if (r.status === 'Izin') izin++;
-          else if (r.status === 'Sakit') sakit++;
-          else if (r.status === 'Alpa') alpa++;
-        });
+        if (dateMap) {
+          dateMap.forEach((dayEntry) => {
+            const masuk = dayEntry.masuk;
+            if (masuk) {
+              if (masuk.status === 'Hadir') hadir++;
+              else if (masuk.status === 'Terlambat') {
+                terlambat++;
+                totalTerlambatMenit += calculateLateMinutes(masuk, cutoffTime);
+              } else if (masuk.status === 'Izin') izin++;
+              else if (masuk.status === 'Sakit') sakit++;
+              else if (masuk.status === 'Alpa') alpa++;
+            }
+          });
+        }
       } else {
-        uniqueActiveDates.forEach((dateStr) => {
-          const dayRecords = recordsInMonth.filter(
-            (r) => r.nisn === student.nisn && (normalizeToYyyyMmDd(r.tanggal) === dateStr || normalizeToYyyyMmDd(r.timestamp) === dateStr)
-          );
-          const masuk = dayRecords.find((r) => r.jenis === 'Masuk');
-          const pulang = dayRecords.find((r) => r.jenis === 'Pulang');
+        for (let i = 0; i < uniqueActiveDates.length; i++) {
+          const dateStr = uniqueActiveDates[i];
+          const dayEntry = dateMap ? dateMap.get(dateStr) : undefined;
+          const masuk = dayEntry?.masuk;
+          const pulang = dayEntry?.pulang;
 
           if (masuk) {
             if (masuk.status === 'Hadir') {
@@ -726,7 +752,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
             // No scan on an active attendance day => Automated ALPA
             alpa++;
           }
-        });
+        }
       }
 
       const totalMasuk = hadir + terlambat + izin + sakit + alpa;
@@ -750,7 +776,7 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     });
   }, [students, attendance, filterBulan, filterKelas, filterNama, isRecordForInactiveStudent]);
 
-  // Calculate Raw Paired Daily Attendance (Waktu Masuk, Waktu Pulang, and Waktu Terlambat)
+  // Calculate Raw Paired Daily Attendance (Waktu Masuk, Waktu Pulang, and Waktu Terlambat) using fast HashMap
   const rawPairedDailyRecords = React.useMemo(() => {
     if (recapMode !== 'harian' && recapMode !== 'semua') return [];
     const cutoffTime = store.getSettings().cutoffTime || '07:15';
@@ -768,11 +794,29 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
     const dayRecords = attendance.filter((r) => isMatchTanggal(r, filterTanggal) && !isRecordForInactiveStudent(r));
     const activeStudentNisns = new Set(activeStudents.map((s) => s.nisn).filter(Boolean));
 
+    // Pre-index day records by NISN
+    const dayRecordsMap = new Map<string, { masuk?: AttendanceRecord; pulang?: AttendanceRecord; all: AttendanceRecord[] }>();
+    for (let i = 0; i < dayRecords.length; i++) {
+      const r = dayRecords[i];
+      if (!r.nisn) continue;
+      let entry = dayRecordsMap.get(r.nisn);
+      if (!entry) {
+        entry = { all: [] };
+        dayRecordsMap.set(r.nisn, entry);
+      }
+      entry.all.push(r);
+      if (r.jenis === 'Masuk' && !entry.masuk) {
+        entry.masuk = r;
+      } else if (r.jenis === 'Pulang' && !entry.pulang) {
+        entry.pulang = r;
+      }
+    }
+
     // 1. Process active registered students
     const paired = activeStudents.map((student) => {
-      const studentDayRecords = dayRecords.filter((r) => r.nisn === student.nisn);
-      const masuk = studentDayRecords.find((r) => r.jenis === 'Masuk');
-      const pulang = studentDayRecords.find((r) => r.jenis === 'Pulang');
+      const entry = dayRecordsMap.get(student.nisn);
+      const masuk = entry?.masuk;
+      const pulang = entry?.pulang;
 
       let status: AttendanceStatus = 'Alpa';
       let lateMinutes = 0;
@@ -819,17 +863,17 @@ export const AttendanceRecap: React.FC<AttendanceRecapProps> = ({ currentOfficer
 
     const unlinkedNisns: string[] = Array.from(new Set<string>(unlinkedRecords.map((r) => r.nisn).filter(Boolean)));
     unlinkedNisns.forEach((nisn) => {
-      const studentDayRecords = unlinkedRecords.filter((r) => r.nisn === nisn);
-      const masuk = studentDayRecords.find((r) => r.jenis === 'Masuk');
-      const pulang = studentDayRecords.find((r) => r.jenis === 'Pulang');
-      const sample = masuk || pulang || studentDayRecords[0];
+      const entry = dayRecordsMap.get(nisn);
+      const masuk = entry?.masuk;
+      const pulang = entry?.pulang;
+      const sample = masuk || pulang || (entry?.all && entry.all[0]) || unlinkedRecords.find((r) => r.nisn === nisn);
 
       const syntheticStudent: Student = {
         id: `unlinked-${nisn}`,
         nisn: nisn,
-        nama: sample.nama || `Siswa ${nisn}`,
-        kelas: sample.kelas || (filterKelas !== 'Semua' ? filterKelas : 'X'),
-        id_qr: sample.id_qr || nisn,
+        nama: sample?.nama || `Siswa ${nisn}`,
+        kelas: sample?.kelas || (filterKelas !== 'Semua' ? filterKelas : 'X'),
+        id_qr: sample?.id_qr || nisn,
         foto: '',
         status: 'aktif',
       };

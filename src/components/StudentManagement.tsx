@@ -216,7 +216,6 @@ export const StudentManagement: React.FC<StudentManagementProps> = ({ userRole =
   useEffect(() => {
     setStudents(store.getStudents());
     setAttendance(store.getAttendance());
-    store.fetchFromServer();
     const unsubscribe = store.subscribe(() => {
       setStudents(store.getStudents());
       setAttendance(store.getAttendance());
